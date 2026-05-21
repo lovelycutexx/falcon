@@ -37,3 +37,13 @@ venv/
 *.7z
 *.tmp
 *.bak
+
+# HDL simulation outputs
+*.vcd
+*.vvp
+*.fst
+*.ghw
+
+# Local backup snapshots
+backup_*/
+backup*/
