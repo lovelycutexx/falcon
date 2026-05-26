@@ -101,21 +101,15 @@ iverilog -g2012 -o "%VVP%" ^
     "%RT%\falconsign_gm_rom.v" ^
     "%RT%\falcon_f64_ffsampling_exu.v" ^
     "%RT%\falconsign_ffsampling_task_update.v" ^
-    "%RT%\falcon_ffsampling_iter_ctrl.v" ^
     "%RT%\falconsign_samplerz_top.v" ^
-    "%RT%\falconsign_bs_cdt_rom.v" ^
     "%RT%\falconsign_chacha20_rng.v" ^
     "%RT%\falcon_f64_bhat_mul_exu.v" ^
-    "%RT%\falcon_f64_vec_sub_exu.v" ^
     "%RT%\falconsign_fpr_to_int16.v" ^
     "%RT%\falconsign_ntt_exu.v" ^
     "%RT%\falconsign_ntt_bfly.v" ^
     "%RT%\falconsign_ntt_cg_addr.v" ^
-    "%RT%\falconsign_ntt_addr_gen.v" ^
     "%RT%\falconsign_ntt_psi_rom.v" ^
     "%RT%\falconsign_ntt_twiddle_rom.v" ^
-    "%RT%\falconsign_norm_check.v" ^
-    "%RT%\falconsign_norm_i16_check.v" ^
     "%RT%\falconsign_norm_i16_sig_check.v" ^
     "%TB%.v"
 if %ERRORLEVEL% neq 0 (
@@ -130,3 +124,4 @@ vvp "%VVP%" %DUMP_ARG% +TWIDDLE_RE=DOC/twiddle_rom_re.hex +TWIDDLE_IM=DOC/twiddl
 set "SIM_STATUS=%ERRORLEVEL%"
 popd
 exit /b %SIM_STATUS%
+

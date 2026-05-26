@@ -354,189 +354,130 @@ TB_PASS pqc_common_modules
 ## 当前边界
 
 当前 `SRC` 中的代码不是完整的 CTRU / NEV / Falcon / HAWK 实现。它是公共硬件资源的第一版 RTL 基础，用于后续完整算法集成与可重构平台设计。
-## Simulation and performance notes
 
-The current Falcon signing RTL has been exercised with unit-level FFT,
-ffSampling, SamplerZ, NTT, normalization, and top-level signing testbenches.
-The checked-in CSV files preserve representative hardware simulation outputs.
+## 当前实现范围：仅 Falcon Sign
 
-- FFT regression coverage:
-  - `hw_results.csv` contains 456 rows across 16 small tests.
-  - Small FFT/IFFT tests cover N = 4, 8, and 16 with zero, all-one,
-    impulse, random, simple, back-to-back, and forward-then-inverse cases.
-  - `hw_results_large.csv` contains 11,520 rows across N = 256, 512, and
-    1024 large-vector cases.
-  - Each FFT dataset records input, FFT, and IFFT phases.
+本仓库当前重点实现和验证的是 **Falcon Sign 签名流程**。顶层入口是
+`rtl/falcon/falconsign_top.v`，围绕签名所需的数据通路组织：
 
-- SamplerZ / ffSampling:
-  - The local SamplerZ + real-FPU smoke test reports 30 accepted samples and
-    0 rejected samples.
-  - The observed per-sample latency in that smoke test ranges from 35 to 197
-    cycles for the listed mu and sigma_inv cases.
-  - The full-key signing run issues and completes 5,623 ffSampling tasks with
-    1,024 SamplerZ commands/responses.
+- 消息哈希与 `HashToPoint`
+- FFT / IFFT 浮点频域变换
+- Falcon tree / ffSampling 任务调度
+- SamplerZ 离散高斯采样
+- B-hat 频域乘法
+- FPR 到 int16 签名系数转换
+- NTT / 模 q 整数路径
+- norm bound / rejection check
+- 签名结果输出与状态统计
 
-- Top-level Falcon signing simulation:
-  - Bypass-ffSampling identity mode completes in 217,013 cycles.
-  - Full-key signing with real ffSampling and rejection-check path completes
-    in 472,710 cycles in the latest passing full-key run.
-  - The same run reports 1,767 SamplerZ attempts, 743 rejection retries, a
-    maximum of 7 rejects per command, and an average of 1.725 attempts per
-    command.
-  - The official verifier reports `verify_raw=PASS`, `relation_bad=0`,
-    `norm_s1=15171814`, `norm_s2=15044023`, total norm `30215837`, under the
-    bound `34034726`.
+目前仓库 **不包含完整 Falcon KeyGen 顶层实现**，也 **不包含完整独立 Falcon Verify 顶层实现**。
+其中 HashToPoint、NTT、norm check 等 Verify 相关基础模块已经存在，但在当前工程中主要服务于
+Falcon Sign bring-up、签名数据通路验证和局部模块测试。
 
-Generated simulation products such as `.vcd`, `.vvp`, `.log`, `.exe`, and
-local tool indexes are intentionally ignored to keep the repository compact.
+## 使用指南
 
-## 文件与模块说明
+### 文件与模块速查
 
-本仓库当前主要围绕 Falcon 签名硬件实现，代码分为 RTL 设计、软件辅助工具、
-testbench 验证环境和仿真数据四类。
+- `rtl/falcon/falconsign_top.v`：Falcon Sign 当前顶层，负责串联签名各阶段。
+- `rtl/falcon/falconsign_memory.v`：签名流程共享存储和地址空间。
+- `rtl/falcon/falconsign_hash_to_point.v`、`falconsign_shake256.v`、
+  `falconsign_keccak_core.v`：消息哈希、SHAKE256 和 HashToPoint 路径。
+- `rtl/falcon/falcon_f64_fft_exu.v`、`falcon_f64_complex_bfly.v`：
+  浮点 FFT/IFFT 执行路径。
+- `rtl/falcon/falcon_f64_ffsampling_exu.v`、
+  `falconsign_ffsampling_task_update.v`：ffSampling 执行和任务更新路径。
+- `rtl/falcon/falconsign_samplerz_top.v`、`falconsign_chacha20_rng.v`：
+  SamplerZ 离散高斯采样和随机数路径。
+- `rtl/falcon/falcon_f64_bhat_mul_exu.v`：B-hat 频域乘法执行单元。
+- `rtl/falcon/falconsign_ntt_exu.v`、`falconsign_ntt_bfly.v`、
+  `falconsign_ntt_*_rom.v`：模 q NTT 整数路径和常量 ROM。
+- `rtl/falcon/falconsign_fpr_to_int16.v`、`falconsign_norm*_check.v`：
+  签名系数转换、norm 检查和 rejection check。
+- `rtl/falcon/unused_archive/`：暂不参与当前顶层的旧版/备用模块归档。
+- `sw/`：黄金数据生成、expanded key 处理、RTL 输出分析和签名关系验证工具。
+- `tb/`：单元 testbench、顶层 Falcon Sign testbench、KAT 数据和仿真夹具。
 
-### 顶层目录
+### 目录怎么用
 
-- `rtl/falcon/`: Falcon 签名硬件 RTL。包含浮点 FFT/ffSampling、SamplerZ、
-  HashToPoint、NTT、norm check、片上存储和顶层控制模块。
-- `sw/`: C/PowerShell/批处理辅助工具和软件生成的黄金数据。用于生成 Falcon
-  硬件测试向量、拆分 expanded key、导出官方中间值、验证 RTL 输出签名。
-- `tb/`: Verilog testbench、KAT 输入、黄金输出、中间 dump 和回归测试数据。
-  这里的文件用于验证单个 EXU，也用于验证完整 Falcon signing datapath。
-- `*.hex`, `*.mem`, `*.bin`, `*.map`: 仿真输入、ROM 初始化、expanded key、
-  Falcon tree 和中间阶段参考数据。
-- `hw_results.csv`, `hw_results_large.csv`, `samplerz_results.csv`: 已保留的代表性
-  仿真输出和性能结果，用来说明 FFT 和 SamplerZ/ffSampling 行为。
+- `rtl/falcon/`：硬件 RTL 主目录。修改 Falcon Sign 硬件逻辑时优先看这里。
+- `tb/`：Verilog testbench、测试向量、中间 dump、黄金输出和仿真结果。
+- `sw/`：软件辅助工具，用于生成 expanded key、Falcon tree、ffSampling 黄金数据、
+  RTL 签名验证输入等。
+- 根目录 `.hex/.csv` 文件：保留的代表性输入和仿真结果，便于快速查看当前测试覆盖。
 
-### RTL 模块
+### 推荐阅读顺序
 
-#### 顶层与系统控制
+1. `rtl/falcon/falconsign_top.v`：先看顶层状态机、阶段划分和各 EXU 的连接关系。
+2. `rtl/falcon/falcon_f64_fft_exu.v`：理解 FFT / IFFT 浮点频域路径。
+3. `rtl/falcon/falcon_f64_ffsampling_exu.v` 和
+   `rtl/falcon/falconsign_ffsampling_task_update.v`：理解 ffSampling 任务流。
+4. `rtl/falcon/falconsign_samplerz_top.v`：理解 SamplerZ 和随机采样路径。
+5. `rtl/falcon/falconsign_ntt_exu.v`：理解模 q / NTT 整数路径。
+6. `tb/tb_falconsign_top_fullkey.v`：看完整 Falcon Sign 仿真如何加载 key、运行签名并检查结果。
 
-- `falconsign_top.v`: Falcon signing 顶层。连接 SeedHash/HashToPoint、FFT、
-  ffSampling、B-hat 乘法、IFFT、FprToInt、NTT、拒绝检查和输出状态。
-- `falconsign_memory.v`: Falcon signing 共享存储模块。为多阶段 datapath 提供
-  地址空间和读写接口。
-- `falconsign_word_fifo.v`: 256-bit word FIFO，用于 SHAKE/RNG/采样路径中的流式
-  数据缓冲。
+### Windows 仿真流程
 
-#### Hash 与随机数路径
+需要先安装或配置 `iverilog` 和 `vvp`，并确保它们在 PATH 中。
 
-- `falconsign_keccak_core.v`: Keccak 核心轮函数，作为 SHAKE256 的底层置换核心。
-- `falconsign_shake256.v`: SHAKE256 吸收/挤出模块，用于消息哈希、HashToPoint
-  和随机流生成。
-- `falconsign_hash_to_point.v`: Falcon HashToPoint 映射，将消息摘要映射到模 q
-  多项式系数。
-- `falconsign_chacha20_rng.v`: ChaCha20 RNG，用于 SamplerZ 随机输入流。
+运行 full-key Falcon Sign 测试：
 
-#### FFT / FPR 浮点路径
+```powershell
+cd C:\path\to\falcon
+.\sw\run_fullkey_test.bat
+```
 
-- `falcon_fp_fpu.v`: double/fpr 运算封装模块，提供浮点加、减、乘等运算接口。
-- `falcon_f64_add.v`: 64-bit 浮点加法单元。
-- `falcon_f64_mul.v`: 64-bit 浮点乘法单元。
-- `falcon_f64_complex_bfly.v`: 复数 butterfly 运算，用于 FFT/IFFT。
-- `falcon_fft_addr_gen_cfg.v`: FFT 地址生成配置模块。
-- `falcon_f64_fft_exu.v`: f64 FFT/IFFT 执行单元，处理 Falcon 签名中的频域变换。
-- `falcon_f64_vec_sub_exu.v`: f64 向量减法执行单元，用于签名中间向量运算。
-- `falcon_f64_bhat_mul_exu.v`: B-hat 频域乘法执行单元，计算签名相关的频域乘积。
+运行批量 full-key 测试：
 
-#### ffSampling / SamplerZ 路径
+```powershell
+cd C:\path\to\falcon
+powershell -ExecutionPolicy Bypass -File .\sw\run_fullkey_batch.ps1
+```
 
-- `falcon_ffsampling_iter_ctrl.v`: ffSampling 迭代控制器，管理树遍历和任务推进。
-- `falcon_f64_ffsampling_exu.v`: f64 ffSampling 执行单元，处理 split/merge、
-  Gaussian sampling 相关的浮点计算。
-- `falconsign_ffsampling_task_update.v`: ffSampling task 更新和调度模块，维护任务
-  level/index/source/destination 等状态。
-- `falconsign_samplerz_top.v`: SamplerZ 顶层，结合 CDT/base sampler、RNG 和 FPU
-  完成离散高斯采样。
-- `falconsign_bs_cdt_rom.v`: base sampler 的 CDT ROM。
+运行单模块 bring-up 时，可以按 testbench 手动编译。例如 FFT EXU：
 
-#### NTT / 模 q 整数路径
+```powershell
+iverilog -g2001 -o tb\tb_falcon_f64_fft_exu.vvp `
+  tb\tb_falcon_f64_fft_exu.v `
+  rtl\falcon\falcon_f64_fft_exu.v `
+  rtl\falcon\falcon_f64_complex_bfly.v `
+  rtl\falcon\falcon_f64_add.v `
+  rtl\falcon\falcon_f64_mul.v
 
-- `falconsign_ntt_exu.v`: Falcon signing NTT 执行单元，负责模 q 域 NTT/iNTT 和
-  相关多项式运算。
-- `falconsign_ntt_bfly.v`: NTT butterfly 基本运算单元。
-- `falconsign_ntt_addr_gen.v`: NTT 地址生成器。
-- `falconsign_ntt_cg_addr.v`: NTT clock-gating/访问地址辅助生成模块。
-- `falconsign_ntt_twiddle_rom.v`: NTT twiddle factor ROM。
-- `falconsign_ntt_psi_rom.v`: NTT psi 常量 ROM。
-- `falconsign_gm_rom.v`: Falcon FFT/NTT 相关 gm 常量 ROM。
-- `falconsign_twiddle_rom.v`: FFT twiddle 常量 ROM。
+vvp tb\tb_falcon_f64_fft_exu.vvp
+```
 
-#### 转换与检查路径
+### 建议验证顺序
 
-- `falconsign_fpr_to_int16.v`: 将 FPR/f64 输出转换为 int16 签名系数。
-- `falconsign_norm_check.v`: Falcon norm bound 检查模块。
-- `falconsign_norm_i16_check.v`: int16 向量 norm 检查模块。
-- `falconsign_norm_i16_sig_check.v`: 签名路径中的 int16 norm/rejection check 模块。
+1. 先跑 FPU / FFT 单元测试：
+   `tb_falcon_f64_complex_bfly.v`、`tb_falcon_f64_fft_exu.v`、
+   `tb_falcon_f64_fft_large.v`。
+2. 再跑 ffSampling / SamplerZ：
+   `tb_falcon_f64_ffsampling_exu.v`、`tb_ffsampling_*.v`、
+   `tb_samplerz_fpu.v`、`tb_samplerz_standalone.v`。
+3. 再跑 NTT 和整数路径：
+   `tb_falconsign_ntt_exu.v`、`tb_falconsign_ntt_*`。
+4. 再跑转换和 norm 检查：
+   `tb_falconsign_fpr_to_int16_norm.v`、`tb_falconsign_norm_official_c.v`。
+5. 最后跑 Falcon Sign 顶层测试：
+   `tb_falconsign_top_smoke.v`、`tb_falconsign_top_fullkey.v`、
+   `tb_falconsign_top_multicase.v`。
 
-### 软件辅助工具
+### 仿真结果与性能说明
 
-- `gen_falcon_hw_key.c`: 生成硬件可加载的 Falcon key/tree/向量数据。
-- `split_golden_test.c`: 生成 split/merge 类 testbench 的黄金参考数据。
-- `gen_ffsampling_exu_golden.c`: 生成 ffSampling EXU 对比用黄金数据。
-- `gen_ffsampling_identity_nodes.c`: 生成 ffSampling identity/tree 节点测试数据。
-- `dump_official_z_from_hex.c`: 从 hex 数据中导出官方 z0/z1 参考值。
-- `analyze_rtl_z_norm.c`: 分析 RTL 输出 z 向量及 norm 数据。
-- `verify_rtl_signature.c`: 调用/复现官方关系检查，验证 RTL 输出签名是否满足
-  relation 和 norm bound。
-- `build_and_run.bat`, `run_fullkey_test.bat`, `run_fullkey_batch.ps1`: Windows 下
-  编译和运行仿真的脚本。
+- `hw_results.csv`：小规模 FFT/IFFT 仿真输出，覆盖 N = 4、8、16。
+- `hw_results_large.csv`：大规模 FFT/IFFT 仿真输出，覆盖 N = 256、512、1024。
+- `samplerz_results.csv`：SamplerZ 输出采样结果。
+- 当前 full-key Falcon Sign 仿真记录中，签名主路径包含 ffSampling、B-hat 乘法、
+  IFFT、FprToInt、NTT 和 rejection check 等阶段。
+- 最新保留的 full-key 结果中，官方关系检查可达到 `verify_raw=PASS`，
+  norm 总和低于 Falcon bound。
 
-### Testbench 文件
+### 不要提交的文件
 
-#### 顶层签名测试
+以下文件是仿真或本地工具生成物，不应该提交到 GitHub：
 
-- `tb_falconsign_top.v`: Falcon signing 顶层基础测试。
-- `tb_falconsign_top_fullkey.v`: 使用 expanded key/full-key 数据的完整签名路径测试。
-- `tb_falconsign_top_multicase.v`: 多配置顶层测试，覆盖 bypass、force accept、
-  full signature 等模式。
-- `tb_falconsign_top_smoke.v`: 顶层 smoke test，快速检查主路径是否能跑通。
-- `tb_falconsign_top_extkey_smoke.v`: expanded-key 输入的 smoke test。
-- `tb_falconsign_top_extkey_fs_smoke.v`: expanded-key + ffSampling 路径 smoke test。
-- `tb_falconsign_top_dynamic_tree_todo.v`: dynamic tree 接入实验/待完善测试。
-
-#### 单元与 EXU 测试
-
-- `tb_falcon_f64_fft_exu.v`, `tb_falcon_f64_fft_large.v`: f64 FFT/IFFT 小规模和
-  大规模测试。
-- `tb_falcon_f64_complex_bfly.v`: f64 复数 butterfly 单元测试。
-- `tb_falcon_f64_bhat_mul_exu.v`: B-hat 乘法执行单元测试。
-- `tb_falcon_f64_ffsampling_exu.v`: f64 ffSampling EXU 测试。
-- `tb_falcon_f64_split_merge_identity.v`: split/merge identity 行为测试。
-- `tb_falcon_ffsampling_iter_ctrl.v`: ffSampling 迭代控制器测试。
-- `tb_ffsampling*.v`: ffSampling 函数、树、逐节点、trace、layer compare 和
-  C golden 对比测试。
-- `tb_samplerz_fpu.v`, `tb_samplerz_standalone.v`: SamplerZ + FPU 和 standalone
-  sampler 测试。
-- `tb_falconsign_ntt_exu.v`: NTT EXU 测试。
-- `tb_falconsign_ntt_*`: NTT 特定输入模式测试，包括 zero h、identity h、
-  stage/spectrum 检查。
-- `tb_falconsign_hash_to_point*.v`: HashToPoint KAT/official KAT 测试。
-- `tb_falconsign_shake256*.v`: SHAKE256 official KAT 和 FIFO 接口测试。
-- `tb_falconsign_norm_official_c.v`: norm check 与官方 C 行为对比测试。
-- `tb_falconsign_fpr_to_int16_norm.v`: FPR-to-int16 转换与 norm 检查联合测试。
-- `tb_fpu_arith.v`, `tb_falcon_fpu_direct.v`, `tb_half_test.v`: FPU/浮点基础算术测试。
-- `tb_split_golden.v`, `tb_split_one.v`: split 过程和黄金数据对比测试。
-- `tb_base_sampler_scan.v`: base sampler 输出扫描测试。
-
-### 数据文件
-
-- `b00.hex`, `b01.hex`, `b10.hex`, `b11.hex`: Falcon B 矩阵/Gram 相关分量，
-  用于 FFT/ffSampling/B-hat 路径。
-- `b00_official.hex` 等 `*_official.hex`: 官方参考实现导出的对照数据。
-- `tree.hex`, `tree_full_poly.hex`, `tree_compact.hex`, `tree_official_fpr.hex`:
-  Falcon tree/LDL tree 的不同存储格式。
-- `tree.map`, `tree_full_poly.map`: tree 数据布局映射。
-- `expanded_key.bin`: Falcon expanded private key 输入。
-- `hm.hex`, `hm_nonce40.hex`, `h_ntt.hex`, `h_ntt_monty.hex`: HashToPoint 和 NTT
-  路径输入/中间数据。
-- `s1_expected.hex`, `s2_expected.hex`: 期望签名向量。
-- `fs_z0_rtl.hex`, `fs_z1_rtl.hex`, `rtl_s1_modq.hex`, `rtl_s2_i16.hex`: RTL
-  仿真输出 dump，用于和软件/官方结果对比。
-- `sw_z0_official.hex`, `sw_z1_official.hex`, `sw_s2_*_official.hex`: 软件/官方
-  参考输出。
-- `ffexu_*`, `ffid_*`, `ffsampling_*.mem`: ffSampling EXU 和 identity/tree
-  testbench 的输入、输出和中间节点数据。
-- `gm_*`, `twiddle_*`, `ntt_*`: FFT/NTT ROM 初始化数据。
-- `hw_results.csv`, `hw_results_large.csv`: FFT/IFFT 仿真输出结果。
-- `samplerz_results.csv`: SamplerZ 输出采样结果。
+- `.vcd` 波形文件
+- `.vvp` Icarus Verilog 编译输出
+- `.log` 仿真日志
+- `.exe`、`.out` 本地编译程序
+- `.codegraph/`、`.claude/`、`.serena/` 本地工具状态目录

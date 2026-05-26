@@ -1,5 +1,5 @@
 //=============================================================================
-// Falcon ffSampling (SampleZ) 閳?discrete Gaussian sampler over integers.
+// Falcon ffSampling (SampleZ) 闂?discrete Gaussian sampler over integers.
 //
 // Implements Algorithm 12 (ffSampling) from the Falcon specification.
 // Given a floating-point center mu and sigma=1/sigma_inv, returns an
@@ -11,13 +11,13 @@
 // and range reduction for x >= 1.0.
 //
 // Ports:
-//   cmd_mu        閳?distribution center 纰?(FP64)
-//   cmd_sigma_inv 閳?1/锜?(FP64)
-//   cmd_sigma_min 閳?锜絖min for security lower bound (FP64)
-//   cmd_pair_mode 閳?1 = sample two independent z values in one command
-//   rsp_z0, rsp_z1 閳?sampled integers as FP64 (z1 valid only in pair mode)
-//   rsp_accept     閳?1 = sample accepted, 0 = rejected (retry loop)
-//   rsp_status     閳?0xFF on failure (99 rejections exhausted)
+//   cmd_mu        闂?distribution center 缁?(FP64)
+//   cmd_sigma_inv 闂?1/闁?(FP64)
+//   cmd_sigma_min 闂?闁挎粎绂唌in for security lower bound (FP64)
+//   cmd_pair_mode 闂?1 = sample two independent z values in one command
+//   rsp_z0, rsp_z1 闂?sampled integers as FP64 (z1 valid only in pair mode)
+//   rsp_accept     闂?1 = sample accepted, 0 = rejected (retry loop)
+//   rsp_status     闂?0xFF on failure (99 rejections exhausted)
 //=============================================================================
 `timescale 1ns/1ps
 module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
@@ -38,32 +38,32 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 );
 
   // FPU opcodes
-  localparam[3:0] FA  = 0,   // FADD  閳?a + b
-                  FS  = 1,   // FSUB  閳?a - b
-                  FM  = 2,   // FMUL  閳?a * b
-                  FMA = 3,   // FMADD 閳?a * b + c
+  localparam[3:0] FA  = 0,   // FADD  闂?a + b
+                  FS  = 1,   // FSUB  闂?a - b
+                  FM  = 2,   // FMUL  闂?a * b
+                  FMA = 3,   // FMADD 闂?a * b + c
                   FC  = 9,   // FCVT / compare
                   FF  = 12,  // FFLOOR
                   FI  = 13;  // FINT-TO-FLOAT
 
-  // Taylor coefficients for exp(-x) 閳?1 - x + x铏?2 - x椴?6 + x閳?24
+  // Taylor coefficients for exp(-x) 闂?1 - x + x闁?2 - x濡?6 + x闂?24
   // Evaluated as Horner: (((C4*x + C3)*x + C2)*x + C1)*x + 1.0
   localparam[63:0] C1 = 64'hBFF0000000000000,  // -1.0
                    C2 = 64'h3FE0000000000000,  //  0.5
-                   C3 = 64'hBFC5555555555555,  // -1/6  閳?-0.1666667
-                   C4 = 64'h3FA5555555555555,  //  1/24 閳? 0.0416667
+                   C3 = 64'hBFC5555555555555,  // -1/6  闂?-0.1666667
+                   C4 = 64'h3FA5555555555555,  //  1/24 闂? 0.0416667
                    F1 = 64'h3FF0000000000000,  //  1.0
                    FH = 64'h3FE0000000000000,  //  0.5
   // Range-reduction constants: ENn = exp(-n)
-                   EN1 = 64'h3FD78B56362CEF38, // exp(-1) 閳?0.3679
-                   EN2 = 64'h3FC152AAA3BF81CC, // exp(-2) 閳?0.1353
-                   EN3 = 64'h3FA97DB0CCCEB0AF, // exp(-3) 閳?0.0498
+                   EN1 = 64'h3FD78B56362CEF38, // exp(-1) 闂?0.3679
+                   EN2 = 64'h3FC152AAA3BF81CC, // exp(-2) 闂?0.1353
+                   EN3 = 64'h3FA97DB0CCCEB0AF, // exp(-3) 闂?0.0498
   // z0 correction: NEG_INV_2SQRSIGMA0 = -1/(2*sigma_max^2) = -1/(2*1.8205^2)
-  // Used in FMA to subtract z0铏?(2锜絖max铏? from rejection exponent
+  // Used in FMA to subtract z0闁?(2闁挎粎绂唌ax闁? from rejection exponent
                    NEG_INV_2SQRSIGMA0 = 64'hBFC34F8BC183BBC2;
 
   //-----------------------------------------------------------------
-  // FSM state encoding 閳?Algorithm 12 (ffSampling) step-by-step
+  // FSM state encoding 闂?Algorithm 12 (ffSampling) step-by-step
   //
   // Setup phase:
   //   SI:  idle, wait for command
@@ -71,13 +71,13 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //   SRW: wait for RNG acknowledge
   //   SRF: rfp = floor(mu) via hardware function f64_floor_i64
   //   SRI: rfp = int_to_float(rfp)          (FI op)
-  //   SRS: r_frac = mu - rfp                (FS op)  fractional part 閳?[0,1)
+  //   SRS: r_frac = mu - rfp                (FS op)  fractional part 闂?[0,1)
   //   SRC: branch on r_frac sign (always non-negative in practice)
   //   SR1: r_frac = r_frac - 1.0            (FS op)  unreachable safety path
-  //   SCM: ccs = sigma_min * sigma_inv       (FM op)  = 锜絖min/锜?  //
+  //   SCM: ccs = sigma_min * sigma_inv       (FM op)  = 闁挎粎绂唌in/闁?  //
   // Base sampler phase (CDT scan):
   //   SSB: extract zs=sign-bit(b), ut=16-bit uniform, sc=0 from RNG buffer
-  //   SSS: CDT scan loop 閳?find smallest sc where CDT[sc] >= ut, or sc=15
+  //   SSS: CDT scan loop 闂?find smallest sc where CDT[sc] >= ut, or sc=15
   //        On match: zi = zs ? (sc+1) : (-sc)
   //        This matches C-code: z = b + ((b<<1)-1)*z0
   //
@@ -88,31 +88,31 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //   SDQ: dsq = zmr * zmr                   (FM op)  = (z - r_frac)^2
   //   SYM: by  = dsq * sigma_inv             (FM op)
   //   SYH: by  = by  * sigma_inv             (FM op)
-  //   SYQ: by  = by  * 0.5                   (FM op)  閳?(z-r)铏?(2锜借檹)
+  //   SYQ: by  = by  * 0.5                   (FM op)  闂?(z-r)闁?(2闁挎粌鈧喐顎?
   //
-  // z0 correction 閳?subtracts base-sampler sigma_max bias from rejection:
+  // z0 correction 闂?subtracts base-sampler sigma_max bias from rejection:
   //   SZ0: ba = int_to_float(sc)              (FI op)  sc = z0 = |zi|
-  //   SZ1: ba = ba * ba                       (FM op)  = z0铏?  //   SZ2: by = ba * NEG_INV + by            (FMA op)  by -= z0铏?(2锜絖max铏?
+  //   SZ1: ba = ba * ba                       (FM op)  = z0闁?  //   SZ2: by = ba * NEG_INV + by            (FMA op)  by -= z0闁?(2闁挎粎绂唌ax闁?
   //
-  // BerExp 閳?Bernoulli experiment for exp(-x):
+  // BerExp 闂?Bernoulli experiment for exp(-x):
   //   SYR: check by exponent:
-  //          > 1024 (by>2.0) 閳?instant reject
-  //          ==1024 (by閳溂2,4)) 閳?fire FSUB to range-reduce (subtract 2 or 3)
-  //          ==1023 (by閳溂1,2)) 閳?fire FSUB to range-reduce (subtract 1)
-  //          < 1023 (by<1.0)  閳?skip FSUB, go to polynomial eval
+  //          > 1024 (by>2.0) 闂?instant reject
+  //          ==1024 (by闂佹剚鍘煎┃?,4)) 闂?fire FSUB to range-reduce (subtract 2 or 3)
+  //          ==1023 (by闂佹剚鍘煎┃?,2)) 闂?fire FSUB to range-reduce (subtract 1)
+  //          < 1023 (by<1.0)  闂?skip FSUB, go to polynomial eval
   //        Also sets bs = exp(-n) for the subtracted amount.
   //   SYT: by = FSUB_result  (latch range-reduced by)
   //   SYP0: ba = C4*by + C3                  (FMA op)
   //   SYP1: ba = ba*by + C2                  (FMA op)
   //   SYP2: ba = ba*by + C1                  (FMA op)
-  //   SYP3: ba = ba*by + 1.0                 (FMA op)  Horner done: ba 閳?exp(-x)
+  //   SYP3: ba = ba*by + 1.0                 (FMA op)  Horner done: ba 闂?exp(-x)
   //   SYS:  ba = ba * bs                     (FM op)   apply range-reduction scale
-  //   SYC:  ru = uniform random float 閳?[0,1) from RNG buffer
+  //   SYC:  ru = uniform random float 闂?[0,1) from RNG buffer
   //   SY2:  rsp_accept = (ba > ru)           (FC op)   Bernoulli comparison
   //
   // Result dispatch:
-  //   SCH: if accepted 閳?store z_out into rsp_z0/z1
-  //        if rejected 閳?rc++, retry from SSB (fail at 99 rejections)
+  //   SCH: if accepted 闂?store z_out into rsp_z0/z1
+  //        if rejected 闂?rc++, retry from SSB (fail at 99 rejections)
   //   SNS: switch to second sample (sp=1), loop to SSB (pair mode)
   //   SDO: drive rsp_valid, done
   //   SFA: drive rsp_valid, done, fail
@@ -129,27 +129,27 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //-----------------------------------------------------------------
   reg[5:0]  st, sn;             // FSM state, next-state
   // Command inputs (latched at SI)
-  reg[63:0] mu,                  // 纰? distribution center (FP64)
-            si,                  // 1/锜? inverse of standard deviation (FP64)
-            sn_min;              // 锜絖min: security lower bound on sigma (FP64)
+  reg[63:0] mu,                  // 缁? distribution center (FP64)
+            si,                  // 1/闁? inverse of standard deviation (FP64)
+            sn_min;              // 闁挎粎绂唌in: security lower bound on sigma (FP64)
   reg       pm;                  // pair-mode flag: 1 = produce two samples
   // Computation pipeline
-  reg[63:0] rfp;                 // floor(纰?: integer part (from f64_floor_i64), then as FP64
+  reg[63:0] rfp;                 // floor(缁?: integer part (from f64_floor_i64), then as FP64
   reg[63:0] rint;                // floor(mu) as signed integer
-  reg[63:0] r_frac;              // 纰?- floor(纰?: fractional part 閳?[0, 1)
-  reg[63:0] ccs;                 // 锜絖min / 锜?(computed but unused in current rejection path)
-  reg[15:0] zi;                  // sampled integer offset z (before adding floor(纰?)
+  reg[63:0] r_frac;              // 缁?- floor(缁?: fractional part 闂?[0, 1)
+  reg[63:0] ccs;                 // 闁挎粎绂唌in / 闁?(computed but unused in current rejection path)
+  reg[15:0] zi;                  // sampled integer offset z (before adding floor(缁?)
   reg[63:0] z_fp,                // float(zi)
-            z_out;               // float(zi) + float(floor(纰?) = accepted sample as FP64
+            z_out;               // float(zi) + float(floor(缁?) = accepted sample as FP64
   reg[63:0] zmr,                 // z_fp - r_frac = (z - r_frac)
             dsq;                 // zmr^2 = (z - r_frac)^2
-  reg[63:0] by,                  // x = (z-r_frac)铏?(2锜借檹) 閳?input to BerExp
-            ba,                  // polynomial result 閳?exp(-x)
+  reg[63:0] by,                  // x = (z-r_frac)闁?(2闁挎粌鈧喐顎? 闂?input to BerExp
+            ba,                  // polynomial result 闂?exp(-x)
             bs;                  // scale factor: exp(-n) from range reduction (or 1.0)
   reg[63:0] x_orig;              // original BerExp exponent before range reduction
   reg[63:0] sz_prod;             // registered product for local two-stage FMA
   reg       bn;                  // number of integer range-reduction steps (1..3)
-  reg[63:0] ru;                  // uniform random float comparator 閳?[0, 1)
+  reg[63:0] ru;                  // uniform random float comparator 闂?[0, 1)
   // Base sampler state
   reg[23:0] bs_v0, bs_v1, bs_v2; // 72-bit draw, split into 24-bit limbs
   reg[4:0]  sc;                  // BaseSampler z0 = |zi| (0..18)
@@ -268,7 +268,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 
 `ifndef SYNTHESIS
   // Debug: when +FS_SAMPLE_MU is set, return mu directly as samples
-  // (bypasses the Gaussian sampler 閳?useful for testing caller logic)
+  // (bypasses the Gaussian sampler 闂?useful for testing caller logic)
   reg debug_return_mu;
   reg debug_trace_sampler;
   integer debug_sample_count;
@@ -284,11 +284,11 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //
   // Decomposes IEEE-754 FP64 into sign, exponent, fraction, then shifts
   // the mantissa to extract the integer part. Handles denormals (exp==0),
-  // fractional-only values (|x|<1 閳?0), and overflow (exp >= 1086).
+  // fractional-only values (|x|<1 闂?0), and overflow (exp >= 1086).
   //
-  // For negative non-integer values, returns the floor toward -閳?  // (e.g., floor(-1.5) = -2), matching C's fpr_floor().
+  // For negative non-integer values, returns the floor toward -闂?  // (e.g., floor(-1.5) = -2), matching C's fpr_floor().
   //
-  // Uses combinational logic only 閳?no FPU involvement, single-cycle.
+  // Uses combinational logic only 闂?no FPU involvement, single-cycle.
   //===================================================================
   function [63:0] f64_floor_i64;
     input [63:0] x;
@@ -336,7 +336,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
         // Positive or zero: floor is the integer part
         f64_floor_i64 = ip;
       end else if ((x[62:0] == 63'd0)) begin
-        // -0.0 閳?0 (negation of zero is zero)
+        // -0.0 闂?0 (negation of zero is zero)
         f64_floor_i64 = 64'd0;
       end else begin
         // Negative with fractional part: floor = -(ip + 1)
@@ -476,6 +476,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 `else
   wire        sim_exact_berexp = 1'b0;
 `endif
+  wire        sim_exact_fast_ready = sim_exact_berexp && (ra >= 8'd132) && !rng_req && !sr;
 
   always @(*) begin
     sz_add_a   = 64'd0;
@@ -677,7 +678,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
         SYH: by <= sz_mul_y;                      // by * sigma_inv
         SYQ: by <= sz_mul_y;                      // by * 0.5
 
-        // z0 correction: subtract z0铏?(2锜絖max铏? to account for fixed base-sampler sigma
+        // z0 correction: subtract z0闁?(2闁挎粎绂唌ax闁? to account for fixed base-sampler sigma
         // z0 = sc (CDT index). Uses ba as temporary (free before polynomial eval).
         SZ0: ba <= f64_i64({59'd0, sc});          // ba = int_to_float(sc)
         SZ1: ba <= sz_mul_y;                      // ba = ba * ba = z0^2
@@ -688,16 +689,16 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
         SYR: begin
           x_orig <= by;
           if (ber_too_large) begin
-            // x > 2.0: rejection probability < exp(-2) 閳?0.135 閳?instant reject
+            // x > 2.0: rejection probability < exp(-2) 闂?0.135 闂?instant reject
             rsp_accept <= 0;
           end else begin
             bn <= |ber_k; bs <= exp_neg_uint(ber_k);
             if (1'b0) begin
-              // x 閳?[2.0, 4.0): subtract 2 or 3 depending on by[51]
+              // x 闂?[2.0, 4.0): subtract 2 or 3 depending on by[51]
               bn <= by[51] ? 3 : 2;
               bs <= by[51] ? EN3 : EN2;
             end else if (by[62:52] == 11'd1023) begin
-              // x 閳?[1.0, 2.0): subtract 1
+              // x 闂?[1.0, 2.0): subtract 1
               bn <= 1;
               bs <= EN1;
             end
@@ -717,13 +718,23 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
         SYS:  ba <= sz_mul_y;                     // ba * bs
         SYS2: ba <= sz_mul_y;                     // ba * ccs
 
-        // Generate uniform random float ru 閳?[0,1) from RNG buffer
+        // Generate uniform random float ru 闂?[0,1) from RNG buffer
         SYC: begin
           ru <= f64_uniform01(rb[51:0]);
+          if (sim_exact_berexp) begin
+`ifndef SYNTHESIS
+            rsp_accept <= (($exp(-$bitstoreal(x_orig)) * $bitstoreal(ccs)) > $bitstoreal(f64_uniform01(rb[51:0])));
+`else
+            rsp_accept <= 1'b0;
+`endif
+          end else begin
+            rsp_accept <= f64_ge(ba, f64_uniform01(rb[51:0]));
+          end
           rb <= {52'd0, rb[255:52]}; ra <= ra - 8'd52;
         end
 
-        // Bernoulli comparison: accept if ba > ru
+        // Legacy compare state kept for the non-compressed path; the normal
+        // pipeline resolves the compare in SYC to save one cycle per attempt.
         SY2: begin
           if (sim_exact_berexp) begin
 `ifndef SYNTHESIS
@@ -794,7 +805,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
       SR1: sn = SCM;
       SCM: sn = SSB;
       // Base sampler
-      SSB: sn = SSS;
+      SSB: sn = SSI;
       SSS: sn = SSI;
       // Rejection pipeline
       SSI: sn = SZR;
@@ -804,15 +815,16 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
       SYM: sn = SYH;
       SYH: sn = SYQ;
       SYQ: sn = SZ0;
-      // z0 correction: subtract z0铏?(2锜絖max铏? from rejection exponent
+      // z0 correction: subtract z0闁?(2闁挎粎绂唌ax闁? from rejection exponent
       SZ0: sn = SZ1;
       SZ1: sn = SZ2;
       SZ2: sn = SZ2A;
       SZ2A: sn = SYR;
       // BerExp: range-reduction check
       SYR: if (ber_too_large) sn = SCH;              // instant reject
-           else if (by[62:52] < 11'd1023) sn = SYP0;        // x < 1.0 閳?poly directly
-           else sn = SYT;                                    // x 閳?[1,4) 閳?range-reduce
+           else if (sim_exact_fast_ready) sn = SYC;  // skip unused polynomial work only when RNG buffer is safe
+           else if (by[62:52] < 11'd1023) sn = SYP0;
+           else sn = SYT;
       SYT: sn = SYP0;
       // Horner evaluation
       SYP0: sn = SYP0A;
@@ -825,7 +837,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
       SYP3A: sn = SYS;
       SYS:  sn = SYS2;
       SYS2: sn = SYC;
-      SYC:  sn = SY2;                                        // NOP: random float ready
+      SYC:  sn = SCH;                                        // random float + compare
       SY2:  sn = SCH;
       // Result dispatch
       SCH: if (fail) sn = SFA;
