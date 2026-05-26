@@ -22,7 +22,9 @@ module falconsign_ntt_exu #(
 
     // Base addresses
     input  wire [ADDR_W-1:0] cfg_h_base,
+    input  wire [ADDR_W-1:0] cfg_h_work_base,
     input  wire [ADDR_W-1:0] cfg_s2_base,
+    input  wire [ADDR_W-1:0] cfg_s2_work_base,
     input  wire [ADDR_W-1:0] cfg_c_base,
     input  wire [ADDR_W-1:0] cfg_dst_base,
 
@@ -58,6 +60,13 @@ module falconsign_ntt_exu #(
     localparam [3:0] OP_BITREV    = 6;  // natural <-> bit-reversed permutation
     localparam [3:0] OP_DONE      = 7;
     localparam [3:0] OP_FAIL      = 8;
+    localparam [3:0] OP_COPY_S2   = 9;
+    localparam [3:0] OP_COPY_H    = 10;
+    localparam [3:0] OP_LOAD_H_SB = 11;
+    localparam [3:0] OP_LOAD_S2_SB= 12;
+    localparam [3:0] OP_LOAD_C_SB = 13;
+    localparam [3:0] OP_CONV_SB   = 14;
+    localparam [3:0] OP_WRITE_SB  = 15;
 
     reg [3:0] op_state;
 
@@ -122,6 +131,16 @@ module falconsign_ntt_exu #(
     reg [13:0] bt_dst_coeff;
     reg        bt_same_word;
     reg [255:0] bt_src_word; // buffered source word
+    reg [13:0] h_arr [0:511];
+    reg [13:0] s2_arr [0:511];
+    reg [13:0] c_arr [0:511];
+    reg [13:0] s1_arr [0:511];
+    reg [8:0]  sb_i;
+    reg [8:0]  sb_j;
+    reg [13:0] sb_acc;
+    reg [13:0] sb_prod;
+    reg [8:0]  sb_h_idx;
+    reg        sb_neg;
 
     // Bit-reverse 9-bit value and split into word/lane
     wire [8:0] br_coeff = {bt_nat_idx[0], bt_nat_idx[1], bt_nat_idx[2], bt_nat_idx[3],
@@ -144,7 +163,7 @@ module falconsign_ntt_exu #(
     wire [ADDR_W-1:0] ag_word_a, ag_word_b;
     wire [3:0] ag_lane_a, ag_lane_b;
 
-    falconsign_ntt_addr_gen #(.LOGN(LOGN), .ADDR_W(ADDR_W)) u_ag (
+    falconsign_ntt_cg_addr #(.LOGN(LOGN), .ADDR_W(ADDR_W)) u_ag (
         .stage_idx(stage_idx), .pair_idx(pair_idx),
         .coeff_a(ag_coeff_a), .coeff_b(ag_coeff_b),
         .twiddle_idx(ag_twiddle_idx),
@@ -206,10 +225,28 @@ module falconsign_ntt_exu #(
         end
     endfunction
 
+    function [13:0] add_modq;
+        input [13:0] a;
+        input [13:0] b;
+        reg [14:0] s;
+        begin
+            s = a + b;
+            add_modq = (s >= Q) ? (s - Q) : s[13:0];
+        end
+    endfunction
+
+    function [13:0] sub_modq;
+        input [13:0] a;
+        input [13:0] b;
+        begin
+            sub_modq = (a >= b) ? (a - b) : (a + Q - b);
+        end
+    endfunction
+
     // Base address for current target
     wire [ADDR_W-1:0] target_base;
-    assign target_base = (op_target == TGT_H)  ? cfg_h_base :
-                         (op_target == TGT_S2) ? cfg_s2_base : cfg_dst_base;
+    assign target_base = (op_target == TGT_H)  ? cfg_h_work_base :
+                         (op_target == TGT_S2) ? cfg_s2_work_base : cfg_dst_base;
 
     assign start_ready = (op_state == OP_IDLE);
 
@@ -229,6 +266,7 @@ module falconsign_ntt_exu #(
             bt          <= BT_IDLE; bt_nat_idx <= 0; bt_coeff <= 0;
             bt_dst_coeff <= 0; bt_same_word <= 0;
             bt_src_word <= 0;
+            sb_i <= 0; sb_j <= 0; sb_acc <= 0; sb_prod <= 0; sb_h_idx <= 0; sb_neg <= 0;
             bitrev_next_op <= 0;
             mem_rd_en  <= 0;      mem_rd_addr <= 0;
             mem_wr_en  <= 0;      mem_wr_addr <= 0; mem_wr_data <= 0;
@@ -242,9 +280,279 @@ module falconsign_ntt_exu #(
                     if (start) begin
                         op_target <= TGT_H;
                         inv_mode  <= 0;
-                        op_state  <= OP_PRE;
+                        op_state  <= OP_COPY_H;
                         ls        <= LS_IDLE;
                     end
+                end
+
+                OP_LOAD_H_SB: begin
+                    case (ls)
+                        LS_IDLE: begin word_idx <= 0; ls <= LS_RD_A; end
+                        LS_RD_A: begin
+                            mem_rd_en <= 1;
+                            mem_rd_addr <= cfg_h_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            ls <= LS_WAIT_A;
+                        end
+                        LS_WAIT_A: ls <= LS_WAIT_A2;
+                        LS_WAIT_A2: ls <= LS_CAPT_A;
+                        LS_CAPT_A: begin
+                            h_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
+                            h_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
+                            h_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
+                            h_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
+                            h_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
+                            h_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
+                            h_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
+                            h_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
+                            h_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
+                            h_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
+                            h_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
+                            h_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
+                            h_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
+                            h_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
+                            h_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
+                            h_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            ls <= LS_NEXT;
+                        end
+                        LS_NEXT: begin
+                            if (word_idx == N_WORDS-1) begin
+                                op_state <= OP_LOAD_S2_SB;
+                                ls <= LS_IDLE;
+                            end else begin
+                                word_idx <= word_idx + 1'b1;
+                                ls <= LS_RD_A;
+                            end
+                        end
+                        default: ls <= LS_IDLE;
+                    endcase
+                end
+
+                OP_LOAD_S2_SB: begin
+                    case (ls)
+                        LS_IDLE: begin word_idx <= 0; ls <= LS_RD_A; end
+                        LS_RD_A: begin
+                            mem_rd_en <= 1;
+                            mem_rd_addr <= cfg_s2_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            ls <= LS_WAIT_A;
+                        end
+                        LS_WAIT_A: ls <= LS_WAIT_A2;
+                        LS_WAIT_A2: ls <= LS_CAPT_A;
+                        LS_CAPT_A: begin
+                            s2_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
+                            s2_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
+                            s2_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
+                            s2_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
+                            s2_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
+                            s2_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
+                            s2_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
+                            s2_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
+                            s2_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
+                            s2_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
+                            s2_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
+                            s2_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
+                            s2_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
+                            s2_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
+                            s2_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
+                            s2_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            ls <= LS_NEXT;
+                        end
+                        LS_NEXT: begin
+                            if (word_idx == N_WORDS-1) begin
+                                op_state <= OP_LOAD_C_SB;
+                                ls <= LS_IDLE;
+                            end else begin
+                                word_idx <= word_idx + 1'b1;
+                                ls <= LS_RD_A;
+                            end
+                        end
+                        default: ls <= LS_IDLE;
+                    endcase
+                end
+
+                OP_LOAD_C_SB: begin
+                    case (ls)
+                        LS_IDLE: begin word_idx <= 0; ls <= LS_RD_A; end
+                        LS_RD_A: begin
+                            mem_rd_en <= 1;
+                            mem_rd_addr <= cfg_c_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            ls <= LS_WAIT_A;
+                        end
+                        LS_WAIT_A: ls <= LS_WAIT_A2;
+                        LS_WAIT_A2: ls <= LS_CAPT_A;
+                        LS_CAPT_A: begin
+                            c_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
+                            c_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
+                            c_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
+                            c_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
+                            c_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
+                            c_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
+                            c_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
+                            c_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
+                            c_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
+                            c_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
+                            c_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
+                            c_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
+                            c_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
+                            c_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
+                            c_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
+                            c_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            ls <= LS_NEXT;
+                        end
+                        LS_NEXT: begin
+                            if (word_idx == N_WORDS-1) begin
+                                sb_i <= 0;
+                                sb_j <= 0;
+                                sb_acc <= 0;
+                                op_state <= OP_CONV_SB;
+                            end else begin
+                                word_idx <= word_idx + 1'b1;
+                                ls <= LS_RD_A;
+                            end
+                        end
+                        default: ls <= LS_IDLE;
+                    endcase
+                end
+
+                OP_CONV_SB: begin
+                    if (sb_j <= sb_i) begin
+                        sb_h_idx = sb_i - sb_j;
+                        sb_neg = 1'b0;
+                    end else begin
+                        sb_h_idx = sb_i - sb_j;
+                        sb_neg = 1'b1;
+                    end
+                    sb_prod = barrett(s2_arr[sb_j] * h_arr[sb_h_idx]);
+                    if (sb_neg)
+                        sb_acc <= sub_modq(sb_acc, sb_prod);
+                    else
+                        sb_acc <= add_modq(sb_acc, sb_prod);
+
+                    if (sb_j == 9'd511) begin
+                        s1_arr[sb_i] <= sub_modq(c_arr[sb_i], sb_neg ? sub_modq(sb_acc, sb_prod) : add_modq(sb_acc, sb_prod));
+                        sb_acc <= 0;
+                        sb_j <= 0;
+                        if (sb_i == 9'd511) begin
+                            word_idx <= 0;
+                            op_state <= OP_WRITE_SB;
+                        end else begin
+                            sb_i <= sb_i + 1'b1;
+                        end
+                    end else begin
+                        sb_j <= sb_j + 1'b1;
+                    end
+                end
+
+                OP_WRITE_SB: begin
+                    mem_wr_en <= 1;
+                    mem_wr_addr <= cfg_dst_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                    mem_wr_data <= set_coeff(set_coeff(set_coeff(set_coeff(
+                                   set_coeff(set_coeff(set_coeff(set_coeff(
+                                   set_coeff(set_coeff(set_coeff(set_coeff(
+                                   set_coeff(set_coeff(set_coeff(set_coeff(
+                                   256'd0,
+                                   4'd0,  s1_arr[{word_idx, 4'd0}]),
+                                   4'd1,  s1_arr[{word_idx, 4'd1}]),
+                                   4'd2,  s1_arr[{word_idx, 4'd2}]),
+                                   4'd3,  s1_arr[{word_idx, 4'd3}]),
+                                   4'd4,  s1_arr[{word_idx, 4'd4}]),
+                                   4'd5,  s1_arr[{word_idx, 4'd5}]),
+                                   4'd6,  s1_arr[{word_idx, 4'd6}]),
+                                   4'd7,  s1_arr[{word_idx, 4'd7}]),
+                                   4'd8,  s1_arr[{word_idx, 4'd8}]),
+                                   4'd9,  s1_arr[{word_idx, 4'd9}]),
+                                   4'd10, s1_arr[{word_idx, 4'd10}]),
+                                   4'd11, s1_arr[{word_idx, 4'd11}]),
+                                   4'd12, s1_arr[{word_idx, 4'd12}]),
+                                   4'd13, s1_arr[{word_idx, 4'd13}]),
+                                   4'd14, s1_arr[{word_idx, 4'd14}]),
+                                   4'd15, s1_arr[{word_idx, 4'd15}]);
+                    if (word_idx == N_WORDS-1) begin
+                        op_state <= OP_DONE;
+                    end else begin
+                        word_idx <= word_idx + 1'b1;
+                    end
+                end
+
+                OP_COPY_H: begin
+                    case (ls)
+                        LS_IDLE: begin
+                            word_idx <= 0;
+                            ls <= LS_RD_A;
+                        end
+                        LS_RD_A: begin
+                            mem_rd_en <= 1;
+                            mem_rd_addr <= cfg_h_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            ls <= LS_WAIT_A;
+                        end
+                        LS_WAIT_A: begin
+                            ls <= LS_WAIT_A2;
+                        end
+                        LS_WAIT_A2: begin
+                            ls <= LS_CAPT_A;
+                        end
+                        LS_CAPT_A: begin
+                            word_buf_a <= mem_rd_data;
+                            ls <= LS_WR;
+                        end
+                        LS_WR: begin
+                            mem_wr_en <= 1;
+                            mem_wr_addr <= cfg_h_work_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            mem_wr_data <= word_buf_a;
+                            ls <= LS_NEXT;
+                        end
+                        LS_NEXT: begin
+                            if (word_idx == N_WORDS-1) begin
+                                op_state <= OP_COPY_S2;
+                                ls       <= LS_IDLE;
+                            end else begin
+                                word_idx <= word_idx + 1'b1;
+                                ls <= LS_RD_A;
+                            end
+                        end
+                        default: ls <= LS_IDLE;
+                    endcase
+                end
+
+                OP_COPY_S2: begin
+                    case (ls)
+                        LS_IDLE: begin
+                            word_idx <= 0;
+                            ls <= LS_RD_A;
+                        end
+                        LS_RD_A: begin
+                            mem_rd_en <= 1;
+                            mem_rd_addr <= cfg_s2_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            ls <= LS_WAIT_A;
+                        end
+                        LS_WAIT_A: begin
+                            ls <= LS_WAIT_A2;
+                        end
+                        LS_WAIT_A2: begin
+                            ls <= LS_CAPT_A;
+                        end
+                        LS_CAPT_A: begin
+                            word_buf_a <= mem_rd_data;
+                            ls <= LS_WR;
+                        end
+                        LS_WR: begin
+                            mem_wr_en <= 1;
+                            mem_wr_addr <= cfg_s2_work_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            mem_wr_data <= word_buf_a;
+                            ls <= LS_NEXT;
+                        end
+                        LS_NEXT: begin
+                            if (word_idx == N_WORDS-1) begin
+                                op_target <= TGT_H;
+                                inv_mode  <= 0;
+                                op_state  <= OP_PRE;
+                                ls        <= LS_IDLE;
+                            end else begin
+                                word_idx <= word_idx + 1'b1;
+                                ls <= LS_RD_A;
+                            end
+                        end
+                        default: ls <= LS_IDLE;
+                    endcase
                 end
 
                 // OP_BITREV is handled above (separate case), transitions go here via bitrev_next_op
@@ -299,7 +607,7 @@ module falconsign_ntt_exu #(
                                 ls <= LS_RD_A;
                             end else begin
                                 ls <= LS_IDLE;
-                                // After PRE: BITREV before NTT
+                                // CG addr gen + BITREV: same as DIT but with CG addressing
                                 op_state <= OP_BITREV;
                                 bitrev_next_op <= OP_NTT;
                             end
@@ -386,10 +694,20 @@ module falconsign_ntt_exu #(
                         end
                         BS_RDB: begin
                             word_buf_a <= mem_rd_data;  // word_a arrives here
-                            mem_rd_en <= 1;
-                            mem_rd_addr <= cur_base + ag_word_b;
-                            bfly_go <= 1'b0;
-                            bs <= BS_WB;
+                            if (ag_word_a == ag_word_b) begin
+                                // Early NTT stages often keep both butterfly
+                                // operands inside the same 256-bit memory word.
+                                // Reuse the captured word and skip the redundant
+                                // second read/wait sequence.
+                                word_buf_b <= mem_rd_data;
+                                bfly_go <= 1'b1;
+                                bs <= BS_BFLY;
+                            end else begin
+                                mem_rd_en <= 1;
+                                mem_rd_addr <= cur_base + ag_word_b;
+                                bfly_go <= 1'b0;
+                                bs <= BS_WB;
+                            end
                         end
                         BS_WB: begin
                             // Wait for word_b data (registered read)
@@ -440,7 +758,6 @@ module falconsign_ntt_exu #(
                                     bs <= BS_IDLE;
                                     case (op_target)
                                         TGT_H: begin
-                                            // DIT NTT output is already in natural order.
                                             op_target <= TGT_S2;
                                             op_state <= OP_PRE;
                                         end
@@ -476,7 +793,7 @@ module falconsign_ntt_exu #(
                         end
                         LS_RD_A: begin
                             mem_rd_en <= 1;
-                            mem_rd_addr <= cfg_h_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            mem_rd_addr <= cfg_h_work_base + {{(ADDR_W-5){1'b0}}, word_idx};
                             ls <= LS_WAIT_A;
                         end
                         LS_WAIT_A: begin ls <= LS_WAIT_A2; end
@@ -484,7 +801,7 @@ module falconsign_ntt_exu #(
                         LS_CAPT_A: begin
                             word_buf_a <= mem_rd_data;  // h_ntt word
                             mem_rd_en <= 1;
-                            mem_rd_addr <= cfg_s2_base + {{(ADDR_W-5){1'b0}}, word_idx};
+                            mem_rd_addr <= cfg_s2_work_base + {{(ADDR_W-5){1'b0}}, word_idx};
                             lane_idx <= 0;
                             ls <= LS_WAIT_B;
                         end

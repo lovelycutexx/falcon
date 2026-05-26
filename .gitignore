@@ -47,3 +47,18 @@ venv/
 # Local backup snapshots
 backup_*/
 backup*/
+
+# Local CodeGraph index
+.codegraph/
+
+# Local Serena project state
+.serena/
+
+# Local assistant/tool state
+.claude/
+
+# Native build outputs
+a.out
+*.out
+*.exe
+*.err

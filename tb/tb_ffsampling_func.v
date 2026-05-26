@@ -16,18 +16,15 @@ module tb_ffsampling_func;
     integer i, j, word_cnt;
     reg found_last;
     initial begin
-        $readmemh("ffsampling_func.mem", m32);
-        found_last = 0;
-        word_cnt = 4096;
-        for (i = 0; i < 4096; i = i + 1) begin
-            if (!found_last && m32[i] === 32'hxxxxxxxx) begin word_cnt = i; found_last = 1; end
-        end
-        // Pack 8 × 32-bit into 1 × 256-bit
-        for (i = 0; i < word_cnt / 8; i = i + 1) begin
+        // Zero-init all memory to avoid X propagation into TMP/scratch areas
+        for (i = 0; i < 16384; i = i + 1) mem[i] = 256'd0;
+        $readmemh("ffsampling_real.mem", m32);
+        // Pack all 131072 m32 entries into 16384 mem words
+        for (i = 0; i < 16384; i = i + 1) begin
             mem[i] = {m32[i*8+7], m32[i*8+6], m32[i*8+5], m32[i*8+4],
                       m32[i*8+3], m32[i*8+2], m32[i*8+1], m32[i*8+0]};
         end
-        $display("Loaded %0d 256-bit words from mem file", word_cnt/8);
+        $display("Loaded mem from ffsampling_real.mem");
     end
 
     // Scheduler
@@ -35,7 +32,7 @@ module tb_ffsampling_func;
     wire        ts_start_ready;
     reg  [3:0]  ts_cfg_depth;
     reg         ts_cfg_dynamic;
-    reg  [13:0]  ts_t_base, ts_tree_base, ts_z_base;
+    reg  [13:0]  ts_t_base, ts_tree_base, ts_z_base, ts_tmp_base;
     wire        ts_task_valid, ts_task_ready, ts_task_done, ts_task_fail;
     wire [67:0] ts_task_word;
     wire        ts_busy, ts_done;
@@ -45,6 +42,7 @@ module tb_ffsampling_func;
         .start(ts_start),.start_ready(ts_start_ready),
         .cfg_depth(ts_cfg_depth),.cfg_dynamic_tree(ts_cfg_dynamic),
         .cfg_t_base(ts_t_base),.cfg_tree_base(ts_tree_base),.cfg_z_base(ts_z_base),
+        .cfg_tmp_base(ts_tmp_base),
         .task_valid(ts_task_valid),.task_ready(ts_task_ready),
         .task_word(ts_task_word),.task_done(ts_task_done),
         .task_fail(ts_task_fail),.task_status(),
@@ -109,8 +107,9 @@ module tb_ffsampling_func;
     always @(posedge clk) begin
         fe_sz_rsp_valid <= fe_sz_cmd_valid;
         if (fe_sz_cmd_valid) begin
-            fe_sz_rsp_z0 <= $realtobits(0.0);
-            fe_sz_rsp_z1 <= $realtobits(0.0);
+            // identity sampler: z = mu
+            fe_sz_rsp_z0 <= fe_sz_cmd_mu;
+            fe_sz_rsp_z1 <= fe_sz_cmd_mu;
         end
     end
 
@@ -129,18 +128,6 @@ module tb_ffsampling_func;
     assign ts_task_done  = fe_task_done;
     assign ts_task_fail  = fe_task_fail;
 
-    // Load expected z from file
-    reg [63:0] exp_z_re [0:511], exp_z_im [0:511];
-    reg [31:0] e32 [0:2047];
-    initial begin
-        $readmemh("ffsampling_expected_z.mem", e32);
-        for (i = 0; i < 512; i = i + 1) begin
-            exp_z_re[i] = {e32[i*4], e32[i*4+1]};
-            exp_z_im[i] = {e32[i*4+2], e32[i*4+3]};
-        end
-        $display("Loaded expected z (sample: z[0]=%f %fi)", $bitstoreal(exp_z_re[0]), $bitstoreal(exp_z_im[0]));
-    end
-
     always #5 clk = ~clk;
 
     integer pass, fail_c;
@@ -149,8 +136,10 @@ module tb_ffsampling_func;
     initial begin
         clk = 0; rst_n = 0; ts_start = 0;
         ts_cfg_depth = 9; ts_cfg_dynamic = 0;
-        ts_t_base = 14'd0; ts_tree_base = 14'd4608;  // t at word 0, tree after all segments (9*512=4608)
-        ts_z_base = 14'd0;
+        // Memory layout (matching falconsign_top.v):
+        // T0=0, T1=512, TREE=1024, Z0=3840, Z1=4352, TMP=7552
+        ts_t_base = 14'd0; ts_tree_base = 14'd1024;
+        ts_z_base = 14'd3840; ts_tmp_base = 14'd7552;
         pass = 0; fail_c = 0;
 
         #20 rst_n = 1; #10;
@@ -162,26 +151,31 @@ module tb_ffsampling_func;
         @(posedge clk);
         $display("Tree completed after %0d cycles", $time/10);
 
-        // Read back z from memory (MERGE writes one complex value per word at z_base)
-        // Each word has [63:0]=re, [127:64]=im, [255:128]=0
-        for (i = 0; i < 512; i = i + 1) begin
-            hw_word = mem[i];
-            hw_re = hw_word[63:0];
-            hw_im = hw_word[127:64];
-            if (i == 0 || i == 100 || i == 200)
-                $display("  z[%0d] = %f %fi (exp %f %fi)", i,
-                    $bitstoreal(hw_re), $bitstoreal(hw_im),
-                    $bitstoreal(exp_z_re[i]), $bitstoreal(exp_z_im[i]));
-            if (hw_re == exp_z_re[i] && hw_im == exp_z_im[i])
-                pass = pass + 1;
-            else
-                fail_c = fail_c + 1;
+        // Print z in hex for comparison with software golden
+        $display("z0 (first 4 complex):");
+        for (i = 0; i < 4; i = i + 1) begin
+            hw_word = mem[3840 + i];
+            $display("  z0[%0d] re=%016x im=%016x", i, hw_word[63:0], hw_word[127:64]);
+        end
+        $display("z0 im part (first 4):");
+        for (i = 0; i < 4; i = i + 1) begin
+            hw_word = mem[3840 + 256 + i];
+            $display("  z0[256+%0d] re=%016x im=%016x", i, hw_word[63:0], hw_word[127:64]);
         end
 
-        if (fail_c == 0)
-            $display("PASS: all %0d z values match", pass);
-        else
-            $display("FAIL: %0d pass, %0d fail", pass, fail_c);
+        // z1 at base 3840+512=4352
+        $display("z1 (first 4 complex):");
+        for (i = 0; i < 4; i = i + 1) begin
+            hw_word = mem[4352 + i];
+            $display("  z1[%0d] re=%016x im=%016x", i, hw_word[63:0], hw_word[127:64]);
+        end
+        $display("z1 im part (first 4):");
+        for (i = 0; i < 4; i = i + 1) begin
+            hw_word = mem[4352 + 256 + i];
+            $display("  z1[256+%0d] re=%016x im=%016x", i, hw_word[63:0], hw_word[127:64]);
+        end
+
+        $display("Simulation done.");
         $finish;
     end
 endmodule

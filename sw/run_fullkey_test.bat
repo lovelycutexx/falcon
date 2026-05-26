@@ -6,6 +6,8 @@ REM Run build_and_run.bat first to generate/copy the hex files.
 REM Usage:
 REM   run_fullkey_test.bat
 REM   run_fullkey_test.bat DUMP_VCD
+REM   run_fullkey_test.bat DUMP_FS_Z
+REM   run_fullkey_test.bat DUMP_PIPE
 REM   run_fullkey_test.bat FORCE_ACCEPT
 REM   run_fullkey_test.bat BYPASS_FS
 REM ============================================================
@@ -18,9 +20,23 @@ set "TB=tb_falconsign_top_fullkey"
 set "VVP=%TB%.vvp"
 set "EXTRA_ARGS="
 set "DUMP_ARG="
+set "EXPECT_RNG_NONCE="
 
 for %%a in (%*) do (
+    set "ARG=%%a"
+    if defined EXPECT_RNG_NONCE (
+        set "EXTRA_ARGS=!EXTRA_ARGS! +RNG_NONCE=%%a"
+        set "EXPECT_RNG_NONCE="
+    ) else if /I "%%a"=="+RNG_NONCE" (
+        set "EXPECT_RNG_NONCE=1"
+    ) else if "!ARG:~0,1!"=="+" (
+        set "EXTRA_ARGS=!EXTRA_ARGS! %%a"
+    )
     if /I "%%a"=="DUMP_VCD" set "DUMP_ARG=+DUMP_VCD"
+    if /I "%%a"=="DUMP_FS_Z" set "EXTRA_ARGS=!EXTRA_ARGS! +DUMP_FS_Z"
+    if /I "%%a"=="DUMP_PIPE" set "EXTRA_ARGS=!EXTRA_ARGS! +DUMP_PIPE"
+    if /I "%%a"=="DUMP_SIG" set "EXTRA_ARGS=!EXTRA_ARGS! +DUMP_SIG"
+    if /I "%%a"=="ALLOW_SIG_MISMATCH" set "EXTRA_ARGS=!EXTRA_ARGS! +ALLOW_SIG_MISMATCH"
     if /I "%%a"=="FORCE_ACCEPT" set "EXTRA_ARGS=!EXTRA_ARGS! +FORCE_ACCEPT"
     if /I "%%a"=="BYPASS_FS" set "EXTRA_ARGS=!EXTRA_ARGS! +BYPASS_FS"
     if /I "%%a"=="FS_SAMPLE_MU" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_SAMPLE_MU"
@@ -28,6 +44,10 @@ for %%a in (%*) do (
     if /I "%%a"=="FS_ADJUST_NOP" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_ADJUST_NOP"
     if /I "%%a"=="FS_TRACE_TASKS" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_TRACE_TASKS"
     if /I "%%a"=="FS_TRACE_EXU" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_TRACE_EXU"
+    if /I "%%a"=="FS_TRACE_SAMPLER" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_TRACE_SAMPLER"
+    if /I "%%a"=="FS_TRACE_WRITES" set "EXTRA_ARGS=!EXTRA_ARGS! +FS_TRACE_WRITES"
+    if /I "%%a"=="FORCE_EXPECTED_S2" set "EXTRA_ARGS=!EXTRA_ARGS! +FORCE_EXPECTED_S2"
+    if /I "%%a"=="FORCE_OFFICIAL_Z" set "EXTRA_ARGS=!EXTRA_ARGS! +FORCE_OFFICIAL_Z"
 )
 
 if not exist "%TBDIR%" (
@@ -90,6 +110,7 @@ iverilog -g2012 -o "%VVP%" ^
     "%RT%\falconsign_fpr_to_int16.v" ^
     "%RT%\falconsign_ntt_exu.v" ^
     "%RT%\falconsign_ntt_bfly.v" ^
+    "%RT%\falconsign_ntt_cg_addr.v" ^
     "%RT%\falconsign_ntt_addr_gen.v" ^
     "%RT%\falconsign_ntt_psi_rom.v" ^
     "%RT%\falconsign_ntt_twiddle_rom.v" ^
@@ -104,6 +125,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo === Running simulation ===
+echo Extra args:%EXTRA_ARGS%
 vvp "%VVP%" %DUMP_ARG% +TWIDDLE_RE=DOC/twiddle_rom_re.hex +TWIDDLE_IM=DOC/twiddle_rom_im.hex %EXTRA_ARGS%
 set "SIM_STATUS=%ERRORLEVEL%"
 popd

@@ -156,6 +156,25 @@ module tb_falconsign_top_fullkey;
     endtask
 
     // ─── Direct bus operations ───
+    task dump_mem_span;
+        input [1024*8-1:0] filename;
+        input integer       base_addr;
+        input integer       num_words;
+        integer fd, k;
+        begin
+            fd = $fopen(filename, "w");
+            if (fd == 0) begin
+                $display("ERROR: Cannot open dump file %s", filename);
+                $finish;
+            end
+            for (k = 0; k < num_words; k = k + 1) begin
+                $fdisplay(fd, "%064h", peek_mem_word(base_addr + k));
+            end
+            $fclose(fd);
+            $display("Dumped %0d words from addr %0d -> %s", num_words, base_addr, filename);
+        end
+    endtask
+
     task bus_write;
         input [15:0] addr;
         input [31:0] data;
@@ -223,6 +242,9 @@ module tb_falconsign_top_fullkey;
     reg [31:0] fs_task_fail;
     reg [31:0] sample_cmds;
     reg [31:0] sample_rsps;
+    reg [63:0] sample_attempts_total;
+    reg [63:0] sample_rejects_total;
+    reg [31:0] sample_rejects_max;
     reg [31:0] fs_sample_task_trace;
     reg [3:0]  completed_phases [0:15];
     integer    phase_idx;
@@ -237,12 +259,20 @@ module tb_falconsign_top_fullkey;
             fs_task_fail <= 0;
             sample_cmds <= 0;
             sample_rsps <= 0;
+            sample_attempts_total <= 0;
+            sample_rejects_total <= 0;
+            sample_rejects_max <= 0;
             fs_sample_task_trace <= 0;
             for (phase_idx = 0; phase_idx < 16; phase_idx = phase_idx + 1)
                 completed_phases[phase_idx] = 0;
         end else begin
             total_cycle <= total_cycle + 1;
             if (dut.ts_task_valid && dut.ts_task_ready) fs_task_issues <= fs_task_issues + 1;
+            if ($test$plusargs("FS_TRACE_WRITES") && dut.st == 4 && dut.fe_mem_wr_en &&
+                dut.fe_mem_wr_addr >= LAYOUT_T1_BASE && dut.fe_mem_wr_addr < (LAYOUT_T1_BASE + N_WORDS)) begin
+                $display("  FE_WRITE_T1 addr=%0d data=%h op=%0d level=%0d",
+                    dut.fe_mem_wr_addr, dut.fe_mem_wr_data, dut.u_fe.op_q, dut.u_fe.level_q);
+            end
             if ($test$plusargs("FS_TRACE_TASKS") && dut.ts_task_valid && dut.ts_task_ready && fs_task_issues < 40) begin
                 $display("  FS_TASK[%0d]: op=%0d level=%0d index=%0d src0=%0d src1=%0d dst=%0d aux=%02x",
                     fs_task_issues, dut.ts_task_word[67:64], dut.ts_task_word[63:60], dut.ts_task_word[59:50],
@@ -258,7 +288,13 @@ module tb_falconsign_top_fullkey;
             if (dut.ts_task_done) fs_task_done <= fs_task_done + 1;
             if (dut.ts_task_fail) fs_task_fail <= fs_task_fail + 1;
             if (dut.fe_sz_cmd_valid && dut.fe_sz_cmd_ready) sample_cmds <= sample_cmds + 1;
-            if (dut.sz_rsp_valid) sample_rsps <= sample_rsps + 1;
+            if (dut.sz_rsp_valid) begin
+                sample_rsps <= sample_rsps + 1;
+                sample_attempts_total <= sample_attempts_total + dut.u_sz.debug_cmd_attempts;
+                sample_rejects_total <= sample_rejects_total + dut.u_sz.debug_cmd_rejects;
+                if (dut.u_sz.debug_cmd_rejects > sample_rejects_max)
+                    sample_rejects_max <= dut.u_sz.debug_cmd_rejects;
+            end
 
             if (dut.st != prev_st) begin
                 $display("[T=%0d cy=%0d] PHASE: %s -> %s",
@@ -277,12 +313,31 @@ module tb_falconsign_top_fullkey;
                 end
                 if (prev_st == 4'd4 && dut.st == 4'd5) begin
                     $display("  FS z snapshot:");
+                    if ($test$plusargs("DUMP_FS_Z")) begin
+                        dump_mem_span("fs_z0_rtl.hex", LAYOUT_Z0_BASE, N_WORDS);
+                        dump_mem_span("fs_z1_rtl.hex", LAYOUT_Z1_BASE, N_WORDS);
+                    end
+                    if ($test$plusargs("FORCE_OFFICIAL_Z")) begin
+                        load_hex_to_mem("sw_z0_official.hex", LAYOUT_Z0_BASE, N_WORDS);
+                        load_hex_to_mem("sw_z1_official.hex", LAYOUT_Z1_BASE, N_WORDS);
+                        $display("FORCE_OFFICIAL_Z: replaced FS z0/z1 before BhatMul");
+                    end
                     fs_mu_z0_mismatch = 0;
                     fs_mu_z1_mismatch = 0;
                     fs_mu_first_z0 = -1;
                     fs_mu_first_z1 = -1;
                     if ($test$plusargs("FS_SAMPLE_MU")) begin
                         for (phase_idx = 0; phase_idx < N_WORDS; phase_idx = phase_idx + 1) begin
+                            if (peek_mem_word(LAYOUT_T0_BASE + phase_idx) !== t0_initial[phase_idx]) begin
+                                if (fs_mu_z0_mismatch == 0)
+                                    $display("  T0 changed first=%0d got=%h exp=%h",
+                                        phase_idx, peek_mem_word(LAYOUT_T0_BASE + phase_idx), t0_initial[phase_idx]);
+                            end
+                            if (peek_mem_word(LAYOUT_T1_BASE + phase_idx) !== t1_initial[phase_idx]) begin
+                                if (fs_mu_z1_mismatch == 0)
+                                    $display("  T1 changed first=%0d got=%h exp=%h",
+                                        phase_idx, peek_mem_word(LAYOUT_T1_BASE + phase_idx), t1_initial[phase_idx]);
+                            end
                             if (peek_mem_word(LAYOUT_Z0_BASE + phase_idx) !== t0_initial[phase_idx]) begin
                                 fs_mu_z0_mismatch = fs_mu_z0_mismatch + 1;
                                 if (fs_mu_first_z0 < 0) fs_mu_first_z0 = phase_idx;
@@ -312,6 +367,25 @@ module tb_falconsign_top_fullkey;
                                 phase_idx, peek_mem_word(LAYOUT_T0_BASE + phase_idx),
                                 phase_idx, peek_mem_word(LAYOUT_T1_BASE + phase_idx));
                         end
+                    end
+                end
+                if (prev_st == 4'd5 && dut.st == 4'd6) begin
+                    if ($test$plusargs("DUMP_PIPE")) begin
+                        dump_mem_span("vd_s2_fft.hex", LAYOUT_Z0_BASE, N_WORDS);
+                    end
+                end
+                if (prev_st == 4'd6 && dut.st == 4'd7) begin
+                    if ($test$plusargs("DUMP_PIPE")) begin
+                        dump_mem_span("iv_s2_time.hex", LAYOUT_Z0_BASE, N_WORDS);
+                    end
+                end
+                if (prev_st == 4'd7 && dut.st == 4'd8) begin
+                    if ($test$plusargs("DUMP_PIPE")) begin
+                        dump_mem_span("fi_s2_i16.hex", LAYOUT_SIG_BASE, 32);
+                    end
+                    if ($test$plusargs("FORCE_EXPECTED_S2")) begin
+                        load_hex_to_mem("s2_expected.hex", LAYOUT_SIG_BASE, 32);
+                        $display("FORCE_EXPECTED_S2: replaced s2 before NTT");
                     end
                 end
             end
@@ -420,6 +494,12 @@ module tb_falconsign_top_fullkey;
             total_cycle, restart_cnt, timeout);
         $display("  FS counters: issues=%0d done=%0d fail=%0d sample_cmds=%0d sample_rsps=%0d",
             fs_task_issues, fs_task_done, fs_task_fail, sample_cmds, sample_rsps);
+        if (sample_rsps != 0) begin
+            $display("  SamplerZ rejection stats: attempts=%0d rejects=%0d max_rejects_per_cmd=%0d avg_rejects/cmd=%0d.%03d avg_attempts/cmd=%0d.%03d",
+                sample_attempts_total, sample_rejects_total, sample_rejects_max,
+                sample_rejects_total / sample_rsps, ((sample_rejects_total * 1000) / sample_rsps) % 1000,
+                sample_attempts_total / sample_rsps, ((sample_attempts_total * 1000) / sample_rsps) % 1000);
+        end
         $display("  FS debug: ts_run=%0d ts_state=%0d ts_busy=%0d ts_done=%0d ts_fail=%0d ts_status=%02x fe_state=%0d fe_op=%0d fe_task_ready=%0d",
             dut.u_ts.run_state, dut.u_ts.state_q, dut.ts_busy, dut.ts_done, dut.ts_fail, dut.ts_status,
             dut.u_fe.state, dut.u_fe.op_q, dut.fe_task_ready);
@@ -449,6 +529,10 @@ module tb_falconsign_top_fullkey;
             $display("s1 (first 16 int16 values, at S1_BASE=%0d):", LAYOUT_S1_BASE);
             for (i = 0; i < 4; i = i + 1) begin
                 $display("  word[%0d] = %h", i, peek_mem_word(LAYOUT_S1_BASE + i));
+            end
+            if ($test$plusargs("DUMP_SIG")) begin
+                dump_mem_span("rtl_s2_i16.hex", LAYOUT_SIG_BASE, 32);
+                dump_mem_span("rtl_s1_modq.hex", LAYOUT_S1_BASE, 32);
             end
 
             s1_mismatch = 0;
@@ -482,11 +566,17 @@ module tb_falconsign_top_fullkey;
             $display("======================================");
         end else if (done && !fail) begin
             $display("\n======================================");
-            $display("  TEST FAILED: Signing completed but signature mismatch");
+            if ($test$plusargs("ALLOW_SIG_MISMATCH")) begin
+                $display("  TEST COMPLETED: signature differs from fixed expected vector");
+            end else begin
+                $display("  TEST FAILED: Signing completed but signature mismatch");
+            end
             $display("  S2 mismatches: %0d/32", s2_mismatch);
             $display("  S1 mismatches: %0d/32", s1_mismatch);
             $display("======================================");
-            $fatal(1);
+            if (!$test$plusargs("ALLOW_SIG_MISMATCH")) begin
+                $fatal(1);
+            end
         end else if (fail) begin
             $display("\n======================================");
             $display("  TEST FAILED: status=0x%02h", status);

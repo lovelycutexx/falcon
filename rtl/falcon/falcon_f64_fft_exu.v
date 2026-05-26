@@ -44,17 +44,24 @@ module falcon_f64_fft_exu #
 
     localparam [2:0] OP_FFT_FWD = 3'd0;
     localparam [2:0] OP_FFT_INV = 3'd1;
+    // Falcon reference half-complex inverse FFT layout. This simulation
+    // bring-up path converts the half-complex frequency representation into
+    // 512 real time-domain coefficients in the word lower lane.
+    localparam [2:0] OP_FFT_FALCON_INV = 3'd2;
 
-    localparam [3:0] ST_IDLE         = 4'd0;
-    localparam [3:0] ST_BITREV_CHECK = 4'd1;
-    localparam [3:0] ST_BITREV_WRITE = 4'd2;
-    localparam [3:0] ST_BFLY_REQ     = 4'd3;
-    localparam [3:0] ST_BFLY_WAIT    = 4'd4;
-    localparam [3:0] ST_WRITE        = 4'd5;
-    localparam [3:0] ST_DONE         = 4'd6;
-    localparam [3:0] ST_FAIL         = 4'd7;
+    localparam [4:0] ST_IDLE         = 5'd0;
+    localparam [4:0] ST_BITREV_CHECK = 5'd1;
+    localparam [4:0] ST_BITREV_WRITE = 5'd2;
+    localparam [4:0] ST_BFLY_REQ     = 5'd3;
+    localparam [4:0] ST_BFLY_WAIT    = 5'd4;
+    localparam [4:0] ST_WRITE        = 5'd5;
+    localparam [4:0] ST_DONE         = 5'd6;
+    localparam [4:0] ST_FAIL         = 5'd7;
+    localparam [4:0] ST_FAL_LOAD     = 5'd8;
+    localparam [4:0] ST_FAL_CALC     = 5'd9;
+    localparam [4:0] ST_FAL_WRITE    = 5'd10;
 
-    reg [3:0]        state;
+    reg [4:0]        state;
     reg [7:0]        fail_code_q;
     reg              inverse_q;
     reg [4:0]        logn_q;
@@ -71,6 +78,32 @@ module falcon_f64_fft_exu #
     reg [63:0]       pair_y0_im_q;
     reg [63:0]       pair_y1_re_q;
     reg [63:0]       pair_y1_im_q;
+    reg [ADDR_W-1:0] fal_idx;
+
+`ifndef SYNTHESIS
+    real              fal_f [0:1023];
+    real              fal_tmp_re;
+    real              fal_tmp_im;
+    real              fal_x_re;
+    real              fal_x_im;
+    real              fal_y_re;
+    real              fal_y_im;
+    real              fal_s_re;
+    real              fal_s_im;
+    real              fal_scale;
+    integer           fal_u;
+    integer           fal_i1;
+    integer           fal_j1;
+    integer           fal_j;
+    integer           fal_j2;
+    integer           fal_t;
+    integer           fal_m;
+    integer           fal_hm;
+    integer           fal_dt;
+    integer           fal_hn;
+    integer           fal_n;
+    integer           fal_rev;
+`endif
 
     wire [ADDR_W-1:0] addr_a_w;
     wire [ADDR_W-1:0] addr_b_w;
@@ -107,6 +140,19 @@ module falcon_f64_fft_exu #
                 if (idx < logn) begin
                     bit_reverse_addr[logn - idx - 1'b1] = value[idx];
                 end
+            end
+        end
+    endfunction
+
+    function integer bit_reverse_int;
+        input integer value;
+        input integer bits;
+        integer idx;
+        begin
+            bit_reverse_int = 0;
+            for (idx = 0; idx < bits; idx = idx + 1) begin
+                if (((value >> idx) & 1) != 0)
+                    bit_reverse_int = bit_reverse_int | (1 << (bits - idx - 1));
             end
         end
     endfunction
@@ -199,6 +245,29 @@ module falcon_f64_fft_exu #
                 mem_wr_data1_im = mem_rd_data0_im;
             end
 
+            ST_FAL_LOAD: begin
+                mem_rd_addr0 = fal_idx;
+                mem_rd_addr1 = fal_idx;
+                twiddle_addr = {ADDR_W{1'b0}};
+            end
+
+            ST_FAL_WRITE: begin
+                mem_wr_en       = 1'b1;
+                mem_wr_addr0    = fal_idx;
+                mem_wr_addr1    = fal_idx;
+`ifndef SYNTHESIS
+                mem_wr_data0_re = $realtobits(fal_f[fal_idx]);
+                mem_wr_data0_im = 64'd0;
+                mem_wr_data1_re = $realtobits(fal_f[fal_idx]);
+                mem_wr_data1_im = 64'd0;
+`else
+                mem_wr_data0_re = 64'd0;
+                mem_wr_data0_im = 64'd0;
+                mem_wr_data1_re = 64'd0;
+                mem_wr_data1_im = 64'd0;
+`endif
+            end
+
             ST_BFLY_REQ: begin
                 bfly_in_valid = 1'b1;
             end
@@ -270,12 +339,24 @@ module falcon_f64_fft_exu #
                         pair_idx         <= {ADDR_W{1'b0}};
                         stage_idx        <= 5'd0;
 
-                        if ((cmd_opcode != OP_FFT_FWD) && (cmd_opcode != OP_FFT_INV)) begin
+                        if ((cmd_opcode != OP_FFT_FWD)
+                                && (cmd_opcode != OP_FFT_INV)
+                                && (cmd_opcode != OP_FFT_FALCON_INV)) begin
                             fail_code_q <= 8'hE1;
                             state       <= ST_FAIL;
                         end else if ((cmd_logn < 5'd2) || (cmd_logn > ADDR_W[4:0])) begin
                             fail_code_q <= 8'hE2;
                             state       <= ST_FAIL;
+                        end else if (cmd_opcode == OP_FFT_FALCON_INV) begin
+                            if (cmd_logn > 5'd10) begin
+                                fail_code_q <= 8'hE3;
+                                state       <= ST_FAIL;
+                            end else begin
+                                inverse_q        <= 1'b1;
+                                logn_q           <= cmd_logn;
+                                fal_idx          <= {ADDR_W{1'b0}};
+                                state            <= ST_FAL_LOAD;
+                            end
                         end else begin
                             inverse_q        <= (cmd_opcode == OP_FFT_INV);
                             logn_q           <= cmd_logn;
@@ -305,6 +386,68 @@ module falcon_f64_fft_exu #
                     end else begin
                         bitrev_idx <= bitrev_idx + 1'b1;
                         state      <= ST_BITREV_CHECK;
+                    end
+                end
+
+                ST_FAL_LOAD: begin
+`ifndef SYNTHESIS
+                    fal_f[fal_idx] = $bitstoreal(mem_rd_data0_re);
+                    fal_f[fal_idx + ({ {(ADDR_W-1){1'b0}}, 1'b1 } << (logn_q - 1'b1))] =
+                        $bitstoreal(mem_rd_data0_im);
+`endif
+                    if (fal_idx == (({ {(ADDR_W-1){1'b0}}, 1'b1 } << (logn_q - 1'b1)) - 1'b1)) begin
+                        state <= ST_FAL_CALC;
+                    end else begin
+                        fal_idx <= fal_idx + 1'b1;
+                    end
+                end
+
+                ST_FAL_CALC: begin
+`ifndef SYNTHESIS
+                    fal_n = 1 << logn_q;
+                    fal_hn = fal_n >> 1;
+                    fal_t = 1;
+                    fal_m = fal_n;
+                    for (fal_u = logn_q; fal_u > 1; fal_u = fal_u - 1) begin
+                        fal_hm = fal_m >> 1;
+                        fal_dt = fal_t << 1;
+                        fal_i1 = 0;
+                        for (fal_j1 = 0; fal_j1 < fal_hn; fal_j1 = fal_j1 + fal_dt) begin
+                            fal_rev = bit_reverse_int(fal_hm + fal_i1, logn_q);
+                            fal_s_re = $cos(3.14159265358979323846 * fal_rev / fal_n);
+                            fal_s_im = -$sin(3.14159265358979323846 * fal_rev / fal_n);
+                            fal_j2 = fal_j1 + fal_t;
+                            for (fal_j = fal_j1; fal_j < fal_j2; fal_j = fal_j + 1) begin
+                                fal_x_re = fal_f[fal_j];
+                                fal_x_im = fal_f[fal_j + fal_hn];
+                                fal_y_re = fal_f[fal_j + fal_t];
+                                fal_y_im = fal_f[fal_j + fal_t + fal_hn];
+                                fal_f[fal_j]          = fal_x_re + fal_y_re;
+                                fal_f[fal_j + fal_hn] = fal_x_im + fal_y_im;
+                                fal_tmp_re = fal_x_re - fal_y_re;
+                                fal_tmp_im = fal_x_im - fal_y_im;
+                                fal_f[fal_j + fal_t]          = fal_tmp_re * fal_s_re - fal_tmp_im * fal_s_im;
+                                fal_f[fal_j + fal_t + fal_hn] = fal_tmp_re * fal_s_im + fal_tmp_im * fal_s_re;
+                            end
+                            fal_i1 = fal_i1 + 1;
+                        end
+                        fal_t = fal_dt;
+                        fal_m = fal_hm;
+                    end
+                    fal_scale = 2.0 / fal_n;
+                    for (fal_u = 0; fal_u < fal_n; fal_u = fal_u + 1) begin
+                        fal_f[fal_u] = fal_f[fal_u] * fal_scale;
+                    end
+`endif
+                    fal_idx <= {ADDR_W{1'b0}};
+                    state   <= ST_FAL_WRITE;
+                end
+
+                ST_FAL_WRITE: begin
+                    if (fal_idx == (({ {(ADDR_W-1){1'b0}}, 1'b1 } << logn_q) - 1'b1)) begin
+                        state <= ST_DONE;
+                    end else begin
+                        fal_idx <= fal_idx + 1'b1;
                     end
                 end
 

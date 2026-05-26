@@ -18,7 +18,7 @@ module tb_ffsampling_tree;
     wire        ts_start_ready;
     reg  [3:0]  ts_cfg_depth;
     reg         ts_cfg_dynamic;
-    reg  [13:0]  ts_t_base, ts_tree_base, ts_z_base;
+    reg  [13:0]  ts_t_base, ts_tree_base, ts_z_base, ts_tmp_base;
     wire        ts_task_valid, ts_task_ready;
     wire [67:0] ts_task_word;
     wire        ts_task_done, ts_task_fail;
@@ -29,6 +29,7 @@ module tb_ffsampling_tree;
         .start(ts_start),.start_ready(ts_start_ready),
         .cfg_depth(ts_cfg_depth),.cfg_dynamic_tree(ts_cfg_dynamic),
         .cfg_t_base(ts_t_base),.cfg_tree_base(ts_tree_base),.cfg_z_base(ts_z_base),
+        .cfg_tmp_base(ts_tmp_base),
         .task_valid(ts_task_valid),.task_ready(ts_task_ready),
         .task_word(ts_task_word),.task_done(ts_task_done),
         .task_fail(ts_task_fail),.task_status(),
@@ -142,6 +143,7 @@ module tb_ffsampling_tree;
         ts_t_base = 10'd100;
         ts_tree_base = 10'd300;
         ts_z_base = 10'd700;
+        ts_tmp_base = 14'd800;
 
         // Fill memory with dummy data
         for (i = 0; i < 16384; i = i + 1) mem[i] = 256'd0;

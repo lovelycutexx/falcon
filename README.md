@@ -354,3 +354,38 @@ TB_PASS pqc_common_modules
 ## 当前边界
 
 当前 `SRC` 中的代码不是完整的 CTRU / NEV / Falcon / HAWK 实现。它是公共硬件资源的第一版 RTL 基础，用于后续完整算法集成与可重构平台设计。
+## Simulation and performance notes
+
+The current Falcon signing RTL has been exercised with unit-level FFT,
+ffSampling, SamplerZ, NTT, normalization, and top-level signing testbenches.
+The checked-in CSV files preserve representative hardware simulation outputs.
+
+- FFT regression coverage:
+  - `hw_results.csv` contains 456 rows across 16 small tests.
+  - Small FFT/IFFT tests cover N = 4, 8, and 16 with zero, all-one,
+    impulse, random, simple, back-to-back, and forward-then-inverse cases.
+  - `hw_results_large.csv` contains 11,520 rows across N = 256, 512, and
+    1024 large-vector cases.
+  - Each FFT dataset records input, FFT, and IFFT phases.
+
+- SamplerZ / ffSampling:
+  - The local SamplerZ + real-FPU smoke test reports 30 accepted samples and
+    0 rejected samples.
+  - The observed per-sample latency in that smoke test ranges from 35 to 197
+    cycles for the listed mu and sigma_inv cases.
+  - The full-key signing run issues and completes 5,623 ffSampling tasks with
+    1,024 SamplerZ commands/responses.
+
+- Top-level Falcon signing simulation:
+  - Bypass-ffSampling identity mode completes in 217,013 cycles.
+  - Full-key signing with real ffSampling and rejection-check path completes
+    in 472,710 cycles in the latest passing full-key run.
+  - The same run reports 1,767 SamplerZ attempts, 743 rejection retries, a
+    maximum of 7 rejects per command, and an average of 1.725 attempts per
+    command.
+  - The official verifier reports `verify_raw=PASS`, `relation_bad=0`,
+    `norm_s1=15171814`, `norm_s2=15044023`, total norm `30215837`, under the
+    bound `34034726`.
+
+Generated simulation products such as `.vcd`, `.vvp`, `.log`, `.exe`, and
+local tool indexes are intentionally ignored to keep the repository compact.

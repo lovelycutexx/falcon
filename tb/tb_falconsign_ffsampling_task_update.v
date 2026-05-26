@@ -11,6 +11,7 @@ module tb_falconsign_ffsampling_task_update;
     reg  [13:0]  cfg_t_base;
     reg  [13:0]  cfg_tree_base;
     reg  [13:0]  cfg_z_base;
+    reg  [13:0]  cfg_tmp_base;
     wire         task_valid;
     reg          task_ready;
     wire [67:0]  task_word;
@@ -45,6 +46,7 @@ module tb_falconsign_ffsampling_task_update;
         .cfg_t_base       (cfg_t_base),
         .cfg_tree_base    (cfg_tree_base),
         .cfg_z_base       (cfg_z_base),
+        .cfg_tmp_base     (cfg_tmp_base),
         .task_valid       (task_valid),
         .task_ready       (task_ready),
         .task_word        (task_word),
@@ -100,6 +102,7 @@ module tb_falconsign_ffsampling_task_update;
         cfg_t_base       = 14'd100;
         cfg_tree_base    = 14'd300;
         cfg_z_base       = 14'd700;
+        cfg_tmp_base     = 14'd800;
         task_ready       = 1'b1;
         task_done        = 1'b0;
         task_fail        = 1'b0;

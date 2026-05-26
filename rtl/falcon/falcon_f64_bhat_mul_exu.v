@@ -3,8 +3,8 @@
 // Falcon frequency-domain basis multiplication, second signature component.
 //
 // Real Falcon signing computes the lattice point:
-//   s1_fft = (t0 - z0) * b00 + (t1 - z1) * b10
-//   s2_fft = (t0 - z0) * b01 + (t1 - z1) * b11
+//   s1_fft = z0 * b00 + z1 * b10
+//   s2_fft = z0 * b01 + z1 * b11
 //
 // This EXU currently writes the second component because the top-level signing
 // path consumes s2 after iFFT.  Memory layout for non-identity mode:
@@ -158,10 +158,10 @@ module falcon_f64_bhat_mul_exu #(
             ST_FPU_REQ: begin
                 fpu_req_valid = 1'b1;
                 case (phase_q)
-                    PH_D0_RE: begin fpu_req_op = FSUB;   fpu_req_a = t0_re_q; fpu_req_b = z0_re_q; end
-                    PH_D0_IM: begin fpu_req_op = FSUB;   fpu_req_a = t0_im_q; fpu_req_b = z0_im_q; end
-                    PH_D1_RE: begin fpu_req_op = FSUB;   fpu_req_a = t1_re_q; fpu_req_b = z1_re_q; end
-                    PH_D1_IM: begin fpu_req_op = FSUB;   fpu_req_a = t1_im_q; fpu_req_b = z1_im_q; end
+                    PH_D0_RE: begin fpu_req_op = mode_identity_q ? FSUB : FADD; fpu_req_a = mode_identity_q ? t0_re_q : z0_re_q; fpu_req_b = mode_identity_q ? z0_re_q : 64'd0; end
+                    PH_D0_IM: begin fpu_req_op = mode_identity_q ? FSUB : FADD; fpu_req_a = mode_identity_q ? t0_im_q : z0_im_q; fpu_req_b = mode_identity_q ? z0_im_q : 64'd0; end
+                    PH_D1_RE: begin fpu_req_op = FADD;   fpu_req_a = z1_re_q; fpu_req_b = 64'd0; end
+                    PH_D1_IM: begin fpu_req_op = FADD;   fpu_req_a = z1_im_q; fpu_req_b = 64'd0; end
                     PH_M0_RE_A: begin fpu_req_op = FMUL;   fpu_req_a = d0_re_q; fpu_req_b = b01_re_q; end
                     PH_M0_RE_B: begin fpu_req_op = FNMADD; fpu_req_a = d0_im_q; fpu_req_b = b01_im_q; fpu_req_c = tmp_q; end
                     PH_M0_IM_A: begin fpu_req_op = FMUL;   fpu_req_a = d0_re_q; fpu_req_b = b01_im_q; end

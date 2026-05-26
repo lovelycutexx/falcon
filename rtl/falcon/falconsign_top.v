@@ -30,6 +30,7 @@ module falconsign_top #(
     localparam [ADDR_W-1:0] LAYOUT_TREE_BASE   = 1024;
     localparam [ADDR_W-1:0] LAYOUT_Z0_BASE     = 3840;
     localparam [ADDR_W-1:0] LAYOUT_Z1_BASE     = 4352;
+    localparam [ADDR_W-1:0] LAYOUT_H_WORK_BASE = LAYOUT_Z1_BASE + {{(ADDR_W-6){1'b0}}, 6'd32};
     localparam [ADDR_W-1:0] LAYOUT_B00_BASE    = 4864;
     localparam [ADDR_W-1:0] LAYOUT_B01_BASE    = 5376;
     localparam [ADDR_W-1:0] LAYOUT_B10_BASE    = 5888;
@@ -38,6 +39,7 @@ module falconsign_top #(
     localparam [ADDR_W-1:0] LAYOUT_C_INT_BASE  = 7424;
     localparam [ADDR_W-1:0] LAYOUT_H_BASE      = 7456;
     localparam [ADDR_W-1:0] LAYOUT_S1_BASE     = 7488;    // s1 output (32 words)
+    localparam [ADDR_W-1:0] LAYOUT_TMP_BASE    = 7552;    // ffSampling internal scratch; scalar leaf scratch aliases SIG
     localparam [ADDR_W-1:0] LAYOUT_T_BASE      = LAYOUT_T0_BASE;
     localparam [ADDR_W-1:0] LAYOUT_Z_BASE      = LAYOUT_Z0_BASE;
     localparam [ADDR_W-1:0] NTT_N_WORDS        = 32;      // 512 int16 / 16 per word
@@ -354,7 +356,7 @@ module falconsign_top #(
 
     // ─── Task Scheduler ───
     wire ts_start,ts_start_ready; wire[LEVEL_W-1:0] ts_cfg_depth; wire ts_cfg_dynamic;
-    wire[ADDR_W-1:0] ts_t_base,ts_tree_base,ts_z_base;
+    wire[ADDR_W-1:0] ts_t_base,ts_tree_base,ts_z_base,ts_tmp_base;
     wire ts_task_valid,ts_task_ready; wire[67:0] ts_task_word;
     wire ts_task_done,ts_task_fail,ts_busy,ts_done,ts_fail;
     wire [7:0] ts_task_status,ts_status;
@@ -363,6 +365,7 @@ module falconsign_top #(
         .start(ts_start),.start_ready(ts_start_ready),
         .cfg_depth(ts_cfg_depth),.cfg_dynamic_tree(ts_cfg_dynamic),
         .cfg_t_base(ts_t_base),.cfg_tree_base(ts_tree_base),.cfg_z_base(ts_z_base),
+        .cfg_tmp_base(ts_tmp_base),
         .task_valid(ts_task_valid),.task_ready(ts_task_ready),
         .task_word(ts_task_word),.task_done(ts_task_done),.task_fail(ts_task_fail),
         .task_status(ts_task_status),.busy(ts_busy),.done(ts_done),.fail(ts_fail),.status(ts_status),
@@ -505,7 +508,9 @@ module falconsign_top #(
         .start(ntt_start), .start_ready(ntt_ready),
         .done(ntt_done), .fail(ntt_fail), .status(ntt_status),
         .cfg_h_base(LAYOUT_H_BASE),
+        .cfg_h_work_base(LAYOUT_H_WORK_BASE),
         .cfg_s2_base(LAYOUT_SIG_BASE),
+        .cfg_s2_work_base(LAYOUT_Z1_BASE),
         .cfg_c_base(LAYOUT_C_INT_BASE),
         .cfg_dst_base(LAYOUT_S1_BASE),
         .mem_rd_en(ntt_mem_rd_en), .mem_rd_addr(ntt_mem_rd_addr),
@@ -557,10 +562,23 @@ module falconsign_top #(
     assign ts_t_base      = LAYOUT_T_BASE;
     assign ts_tree_base   = LAYOUT_TREE_BASE;
     assign ts_z_base      = LAYOUT_Z_BASE;
+    assign ts_tmp_base    = LAYOUT_TMP_BASE;
     assign ts_start       = (st != FS) && (sn == FS);
+`ifndef SYNTHESIS
+    integer debug_rng_nonce_base;
+    initial begin
+        debug_rng_nonce_base = 0;
+        if (!$value$plusargs("RNG_NONCE=%d", debug_rng_nonce_base)) begin
+            debug_rng_nonce_base = 0;
+        end
+    end
+    wire [7:0] rng_nonce_lo = salt_cnt + debug_rng_nonce_base[7:0];
+`else
+    wire [7:0] rng_nonce_lo = salt_cnt;
+`endif
     assign rng_seed_valid = (st == SH) || ((st == SI) && (sn == FS));
     assign rng_seed_key   = 256'h0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF;
-    assign rng_seed_nonce = {88'd0, salt_cnt};
+    assign rng_seed_nonce = {88'd0, rng_nonce_lo};
     assign sz_rng_data    = rng_block[255:0];
     assign sz_rng_ack     = rng_valid && sz_rng_req;
     assign rng_ready      = sz_rng_req;
@@ -582,7 +600,7 @@ module falconsign_top #(
 
     // ─── FFT command ───
     assign fft_cmd_valid  = (st == FC) || (st == IV);
-    assign fft_cmd_opcode = (st == IV) ? 3'd1 : 3'd0;  // FWD / INV
+    assign fft_cmd_opcode = (st == IV) ? 3'd2 : 3'd0;  // FWD / Falcon half-complex INV
     assign fft_cmd_logn   = FALCON_LOGN;
 
     // ─── SHAKE256 absorb control (SH phase) ───

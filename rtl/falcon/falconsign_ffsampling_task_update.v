@@ -1,4 +1,18 @@
 `timescale 1ns/1ps
+// Falcon ffSampling task scheduler.
+//
+// This module turns the recursive ffSampling flow into a stream of 68-bit
+// EXU/SamplerZ tasks. It does not perform floating-point arithmetic itself;
+// it tracks the logical recursion position, computes SRAM addresses, and emits
+// operations in the order required by Falcon:
+//   1. sample the right component z1,
+//   2. adjust the left component t0 = t0 + (t1 - z1) * l10,
+//   3. sample the left component z0,
+//   4. merge z0/z1 back toward the root.
+//
+// bank_q selects the top-level component pass. The first pass samples t1/z1
+// (bank_q=1). After the root z1 is available, a special full-size root adjust
+// updates t0, then the scheduler restarts from the root for t0/z0 (bank_q=0).
 module falconsign_ffsampling_task_update #
 (
     parameter LEVEL_W = 4,
@@ -16,6 +30,7 @@ module falconsign_ffsampling_task_update #
     input      [ADDR_W-1:0] cfg_t_base,
     input      [ADDR_W-1:0] cfg_tree_base,
     input      [ADDR_W-1:0] cfg_z_base,
+    input      [ADDR_W-1:0] cfg_tmp_base,
 
     output reg             task_valid,
     input                  task_ready,
@@ -35,22 +50,33 @@ module falconsign_ffsampling_task_update #
     output reg [1:0]       dbg_state
 );
 
+    // Task opcodes consumed by falcon_f64_ffsampling_exu.
+    // READ_L10 preloads the tree coefficient stream used by the following
+    // SPLIT/ADJUST/MERGE task at the same logical node.
     localparam [3:0] OP_READ_L10     = 4'd0;
     localparam [3:0] OP_SPLIT_T1     = 4'd1;
     localparam [3:0] OP_ADJUST_T0    = 4'd2;
     localparam [3:0] OP_SAMPLE_PAIR  = 4'd3;
     localparam [3:0] OP_MERGE_Z      = 4'd4;
     localparam [3:0] OP_DYNAMIC_LDL  = 4'd5;
+    localparam [3:0] OP_COPY         = 4'd6;
 
     localparam [1:0] ST_RIGHT_DOWN = 2'd0;
     localparam [1:0] ST_RIGHT_UP   = 2'd1;
     localparam [1:0] ST_LEFT_DOWN  = 2'd2;
     localparam [1:0] ST_LEFT_UP    = 2'd3;
 
-    localparam [1:0] SUB_READ  = 2'd0;
-    localparam [1:0] SUB_SPLIT = 2'd1;
-    localparam [1:0] SUB_LDL   = 2'd2;
+    // Per-node micro-steps used before descending into a child.
+    // Dynamic-tree mode may generate LDL data first, then every internal node
+    // reads l10, splits t1, and preserves the right split half for ADJUST.
+    localparam [1:0] SUB_READ     = 2'd0;
+    localparam [1:0] SUB_SPLIT    = 2'd1;
+    localparam [1:0] SUB_LDL      = 2'd2;
+    localparam [1:0] SUB_PRESERVE = 2'd3;
 
+    // RUN_* wraps the valid/ready task interface:
+    // EMIT holds one task stable until accepted; WAIT keeps the scheduler state
+    // frozen until EXU reports task_done/task_fail.
     localparam [2:0] RUN_IDLE  = 3'd0;
     localparam [2:0] RUN_EMIT  = 3'd1;
     localparam [2:0] RUN_WAIT  = 3'd2;
@@ -83,6 +109,9 @@ module falconsign_ffsampling_task_update #
     wire [ADDR_W-1:0]  src1_addr;
     wire [ADDR_W-1:0]  dst_addr;
 
+    // level_q/index_q name the current logical recursion node. Children use
+    // binary-heap numbering, which lets index_q[0] tell whether a completed
+    // child was the right child when returning to its parent.
     assign start_ready       = (run_state == RUN_IDLE);
     assign at_leaf           = (level_q == cfg_depth);
     assign at_root           = ((level_q == {LEVEL_W{1'b0}}) && (index_q == {INDEX_W{1'b0}}));
@@ -93,36 +122,80 @@ module falconsign_ffsampling_task_update #
     assign parent_level      = level_q - 1'b1;
     assign parent_index      = index_q >> 1;
 
-    // Segment-tree + {level,index} addressing.
-    // t/z data: segment at idx << (depth - level)
-    // tree data: 256-word buckets per recursion level. For an internal node
+    // Traversal state is the hardware version of the recursive call stack:
+    //   RIGHT_DOWN: prepare/split a node, then descend into its right child.
+    //   RIGHT_UP:   right child returned; emit ADJUST before going left.
+    //   LEFT_DOWN:  prepare/split a node, then descend into its left child.
+    //   LEFT_UP:    both children returned; emit MERGE and go upward.
+    //
+    // Data layout:
+    // - t/z internal nodes use the compact split layout. A left turn keeps the
+    //   same segment offset; a right turn adds that level's child stride.
+    // - leaves are addressed by flat coefficient index.
+    // - tree data uses Falcon tree buckets per logical recursion level. For an internal node
     // at level d from the root, its L10 polynomial starts at:
     //   d*256 + index*2^(8-d)
     // leaves start at 2304 + index.
     reg [ADDR_W-1:0] component_stride, component_words;
     reg [ADDR_W-1:0] seg_offset, node_words, pair_cnt_for_adj, tree_ofs;
+    reg [ADDR_W-1:0] parent_stride;
     reg [INDEX_W-1:0] data_index;
+    reg [3:0]         tree_level_eff;
+    reg [INDEX_W-1:0] tree_index_eff;
+
+    // Number of complex words in one child component below level lv.
+    // Ordinary internal ADJUST/COPY/MERGE operations use this half-size count.
+    // The root transition from z1 to t0 is different and is marked explicitly
+    // by the root_full bit in pack_adjust_task().
+    function [ADDR_W-1:0] stride_at_level;
+        input [3:0] lv;
+        begin
+            case (cfg_depth - lv)
+                4'd9:  stride_at_level = {{(ADDR_W-8){1'b0}}, 8'd128};
+                4'd8:  stride_at_level = {{(ADDR_W-7){1'b0}}, 7'd64};
+                4'd7:  stride_at_level = {{(ADDR_W-6){1'b0}}, 6'd32};
+                4'd6:  stride_at_level = {{(ADDR_W-5){1'b0}}, 5'd16};
+                4'd5:  stride_at_level = {{(ADDR_W-4){1'b0}}, 4'd8};
+                4'd4:  stride_at_level = {{(ADDR_W-3){1'b0}}, 3'd4};
+                4'd3:  stride_at_level = {{(ADDR_W-2){1'b0}}, 2'd2};
+                4'd2:  stride_at_level = {{(ADDR_W-1){1'b0}}, 1'd1};
+                default: stride_at_level = {{(ADDR_W-1){1'b0}}, 1'd1};
+            endcase
+        end
+    endfunction
+
+    // Preserve storage is a compact side buffer. SPLIT writes the right half
+    // into z_area, but the right child will overwrite/use scratch while it is
+    // sampled, so the original split-right t1 is copied here for ADJUST.
+    function [ADDR_W-1:0] preserve_offset_at_level;
+        input [3:0] lv;
+        begin
+            case (lv)
+                4'd0: preserve_offset_at_level = {ADDR_W{1'b0}};
+                4'd1: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd128};
+                4'd2: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd192};
+                4'd3: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd224};
+                4'd4: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd240};
+                4'd5: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd248};
+                4'd6: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd252};
+                4'd7: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd254};
+                default: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd255};
+            endcase
+        end
+    endfunction
 
     always @(*) begin
-        // component_stride = pair_limit at the CURRENT level
-        // (half the complex-pair count of this node).
-        // This equals the distance between left/right children after SPLIT.
-        case (cfg_depth - level_q)
-            4'd9:  component_stride = {{(ADDR_W-9){1'b0}}, 9'd256};
-            4'd8:  component_stride = {{(ADDR_W-8){1'b0}}, 8'd128};
-            4'd7:  component_stride = {{(ADDR_W-7){1'b0}}, 7'd64};
-            4'd6:  component_stride = {{(ADDR_W-6){1'b0}}, 6'd32};
-            4'd5:  component_stride = {{(ADDR_W-5){1'b0}}, 5'd16};
-            4'd4:  component_stride = {{(ADDR_W-4){1'b0}}, 4'd8};
-            4'd3:  component_stride = {{(ADDR_W-3){1'b0}}, 3'd4};
-            4'd2:  component_stride = {{(ADDR_W-2){1'b0}}, 2'd2};
-            default: component_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
-        endcase
+        component_stride = stride_at_level(level_q);
+    end
+    always @(*) begin
+        parent_stride = stride_at_level(level_q - 1'b1);
     end
     always @(*) begin
         component_words = {{(ADDR_W-1){1'b0}}, 1'b1} << cfg_depth;
     end
 
+    // Kept as an explicit logical data index for debug/future extensions.
+    // Address generation below uses index_q directly.
     always @(*) begin
         if (at_root) begin
             data_index = {INDEX_W{1'b0}};
@@ -131,9 +204,10 @@ module falconsign_ffsampling_task_update #
         end
     end
 
-    // Compute seg_offset by walking the path from root: for each RIGHT
-    // turn at level lv, add pair_limit(lv).  This matches the SPLIT output
-    // layout: left child reuses parent offset, right child = parent + pair_limit.
+    // Compute seg_offset by walking the path from root. For each right turn,
+    // add the child stride at that ancestor level. This matches the SPLIT
+    // output layout: left child reuses parent offset, right child is placed at
+    // parent offset + child_stride.
     function [ADDR_W-1:0] compute_seg_offset;
         input [INDEX_W-1:0] idx;
         input [3:0]          lv;
@@ -144,14 +218,13 @@ module falconsign_ffsampling_task_update #
             for (bitpos = 0; bitpos < lv; bitpos = bitpos + 1) begin
                 if (idx[lv - 1 - bitpos]) begin
                     case (bitpos[3:0])
-                        4'd0: off = off + {{(ADDR_W-9){1'b0}}, 9'd256};
-                        4'd1: off = off + {{(ADDR_W-8){1'b0}}, 8'd128};
-                        4'd2: off = off + {{(ADDR_W-7){1'b0}}, 7'd64};
-                        4'd3: off = off + {{(ADDR_W-6){1'b0}}, 6'd32};
-                        4'd4: off = off + {{(ADDR_W-5){1'b0}}, 5'd16};
-                        4'd5: off = off + {{(ADDR_W-4){1'b0}}, 4'd8};
-                        4'd6: off = off + {{(ADDR_W-3){1'b0}}, 3'd4};
-                        4'd7: off = off + {{(ADDR_W-2){1'b0}}, 2'd2};
+                        4'd0: off = off + {{(ADDR_W-8){1'b0}}, 8'd128};
+                        4'd1: off = off + {{(ADDR_W-7){1'b0}}, 7'd64};
+                        4'd2: off = off + {{(ADDR_W-6){1'b0}}, 6'd32};
+                        4'd3: off = off + {{(ADDR_W-5){1'b0}}, 5'd16};
+                        4'd4: off = off + {{(ADDR_W-4){1'b0}}, 4'd8};
+                        4'd5: off = off + {{(ADDR_W-3){1'b0}}, 3'd4};
+                        4'd6: off = off + {{(ADDR_W-2){1'b0}}, 2'd2};
                         default: off = off + {{(ADDR_W-1){1'b0}}, 1'd1};
                     endcase
                 end
@@ -163,59 +236,35 @@ module falconsign_ffsampling_task_update #
     always @(*) begin
         if (at_root) begin
             seg_offset = {ADDR_W{1'b0}};
+        end else if (at_leaf) begin
+            // Leaves are stored densely as scalar coefficients instead of using
+            // the compact internal polynomial segment layout.
+            seg_offset = {{(ADDR_W-INDEX_W){1'b0}}, index_q};
         end else begin
-            // Both inner nodes and leaves use the same path-walking formula:
-            // offset = sum of pair_limit(lv) for each right-turn ancestor.
+            // Internal node offset = sum of child_stride for every right-turn
+            // ancestor on the path from the root.
             seg_offset = compute_seg_offset(index_q, level_q);
         end
     end
     always @(*) begin
-        // Number of complex words in one component (t0 or t1) at this
-        // recursive node. The node's t1 component starts at t_addr+node_words.
+        // Number of complex words in one logical component at this node.
+        // The main scheduler uses stride_at_level() for child-sized work; this
+        // value remains available for sizing/debug around scalar boundaries.
         case (cfg_depth - level_q)
-            4'd9:  node_words = {{(ADDR_W-9){1'b0}}, 9'd256};
-            4'd8:  node_words = {{(ADDR_W-8){1'b0}}, 8'd128};
-            4'd7:  node_words = {{(ADDR_W-7){1'b0}}, 7'd64};
-            4'd6:  node_words = {{(ADDR_W-6){1'b0}}, 6'd32};
-            4'd5:  node_words = {{(ADDR_W-5){1'b0}}, 5'd16};
-            4'd4:  node_words = {{(ADDR_W-4){1'b0}}, 4'd8};
-            4'd3:  node_words = {{(ADDR_W-3){1'b0}}, 3'd4};
+            4'd9:  node_words = {{(ADDR_W-8){1'b0}}, 8'd128};
+            4'd8:  node_words = {{(ADDR_W-7){1'b0}}, 7'd64};
+            4'd7:  node_words = {{(ADDR_W-6){1'b0}}, 6'd32};
+            4'd6:  node_words = {{(ADDR_W-5){1'b0}}, 5'd16};
+            4'd5:  node_words = {{(ADDR_W-4){1'b0}}, 4'd8};
+            4'd4:  node_words = {{(ADDR_W-3){1'b0}}, 3'd4};
+            4'd3:  node_words = {{(ADDR_W-2){1'b0}}, 2'd2};
             4'd2:  node_words = {{(ADDR_W-2){1'b0}}, 2'd2};
             default: node_words = {{(ADDR_W-1){1'b0}}, 1'd1};
         endcase
     end
 
     always @(*) begin
-        // pair_cnt_for_adj = offset to the right child after SPLIT at this level.
-        // (Same as component_stride = word_count at this level.)
-        // Root (L=0): 128.  Level 1: 64.  Level 2: 32 …
-        // The actual ADJUST iteration count is controlled by the EXU's word_count,
-        // doubled via aux[7] for the root full-polynomial transition.
-        case (cfg_depth - level_q)
-            4'd9:  pair_cnt_for_adj = {{(ADDR_W-9){1'b0}}, 9'd256};  // root
-            4'd8:  pair_cnt_for_adj = {{(ADDR_W-8){1'b0}}, 8'd128};
-            4'd7:  pair_cnt_for_adj = {{(ADDR_W-7){1'b0}}, 7'd64};
-            4'd6:  pair_cnt_for_adj = {{(ADDR_W-6){1'b0}}, 6'd32};
-            4'd5:  pair_cnt_for_adj = {{(ADDR_W-5){1'b0}}, 5'd16};
-            4'd4:  pair_cnt_for_adj = {{(ADDR_W-4){1'b0}}, 4'd8};
-            4'd3:  pair_cnt_for_adj = {{(ADDR_W-3){1'b0}}, 3'd4};
-            4'd2:  pair_cnt_for_adj = {{(ADDR_W-2){1'b0}}, 2'd2};
-            default: pair_cnt_for_adj = {{(ADDR_W-1){1'b0}}, 1'd1};
-        endcase
-    end
-    always @(*) begin
-        case (level_q)
-            4'd0: tree_ofs = {ADDR_W{1'b0}} + (index_q << 8);
-            4'd1: tree_ofs = {{(ADDR_W-9){1'b0}}, 9'd256} + (index_q << 7);
-            4'd2: tree_ofs = {{(ADDR_W-10){1'b0}}, 10'd512} + (index_q << 6);
-            4'd3: tree_ofs = {{(ADDR_W-10){1'b0}}, 10'd768} + (index_q << 5);
-            4'd4: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1024} + (index_q << 4);
-            4'd5: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1280} + (index_q << 3);
-            4'd6: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1536} + (index_q << 2);
-            4'd7: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1792} + (index_q << 1);
-            4'd8: tree_ofs = {{(ADDR_W-12){1'b0}}, 12'd2048} + index_q;
-            default: tree_ofs = {{(ADDR_W-12){1'b0}}, 12'd2304} + index_q;
-        endcase
+        pair_cnt_for_adj = stride_at_level(level_q);
     end
 
     // Target t values live under cfg_t_base; sampled z values live under cfg_z_base.
@@ -228,35 +277,114 @@ module falconsign_ffsampling_task_update #
     // merge:  z(left/right) -> z(parent)
     wire [ADDR_W-1:0] t_component_base = cfg_t_base + (bank_q ? component_words : {ADDR_W{1'b0}});
     wire [ADDR_W-1:0] z_component_base = cfg_z_base + (bank_q ? component_words : {ADDR_W{1'b0}});
-    // Root SPLIT reads from t_area; all children read from z_area
-    // (where the parent SPLIT wrote their data).
+    // Root SPLIT reads original t from t_area. After that, each child reads
+    // from z_area, because its parent SPLIT staged the child input there.
     wire [ADDR_W-1:0] input_component_base = at_root ? t_component_base : z_component_base;
     wire [ADDR_W-1:0] input_addr = input_component_base + seg_offset;
     wire [ADDR_W-1:0] t_addr    = t_component_base + seg_offset;
     wire [ADDR_W-1:0] z_addr    = z_component_base + seg_offset;
+    wire              at_scalar_split = (level_q == (cfg_depth - 1'b1));
+    wire [INDEX_W-1:0] local_index = index_q;
+    wire [INDEX_W-1:0] local_leaf_index = index_q;
+    // The last internal split produces a scalar pair. Keep the two scalar
+    // inputs in z_area and write sampled leaf outputs into tmp_leaf_base so the
+    // later scalar ADJUST can still read the original t1 scalar.
+    wire [ADDR_W-1:0] scalar_pair_addr = z_component_base + {{(ADDR_W-INDEX_W){1'b0}}, (local_index << 1)};
+    wire [ADDR_W-1:0] scalar_leaf_addr = z_component_base + {{(ADDR_W-INDEX_W){1'b0}}, local_leaf_index};
+    wire [ADDR_W-1:0] tmp_addr = cfg_tmp_base + seg_offset;
+    // Scalar samples need 512 words and must not overlap the compact
+    // internal merge scratch at cfg_tmp_base..cfg_tmp_base+255.
+    wire [ADDR_W-1:0] tmp_leaf_base = cfg_tmp_base - component_words - {{(ADDR_W-8){1'b0}}, 8'd128};
+    wire [ADDR_W-1:0] tmp_leaf_addr = tmp_leaf_base + {{(ADDR_W-INDEX_W){1'b0}}, local_leaf_index};
+    wire [ADDR_W-1:0] tmp_scalar_pair_addr = tmp_leaf_base + {{(ADDR_W-INDEX_W){1'b0}}, (local_index << 1)};
+    wire [ADDR_W-1:0] preserve_base = cfg_tmp_base + {{(ADDR_W-9){1'b0}}, 9'd256};
+    wire [ADDR_W-1:0] preserve_addr = preserve_base + preserve_offset_at_level(level_q);
+    // After the complete z1 tree has been merged at the root, emit one
+    // full-size root ADJUST to update t0 before starting the z0 pass.
+    wire              outer_root_adjust = at_root && bank_q && root_z1_merged_q;
+
+    always @(*) begin
+        // Map traversal position to the Falcon tree entry consumed by the next
+        // task. Ordinary child work uses level+1; scalar-pair work at level 8
+        // shares a tree entry for two leaves; outer_root_adjust uses root l10.
+        if (outer_root_adjust) begin
+            tree_level_eff = 4'd0;
+            tree_index_eff = {INDEX_W{1'b0}};
+        end else if (at_leaf) begin
+            tree_level_eff = 4'd9;
+            tree_index_eff = (bank_q ? {{(INDEX_W-9){1'b0}}, 9'd256} : {INDEX_W{1'b0}})
+                           + index_q[7:0];
+        end else if (level_q == 4'd8) begin
+            tree_level_eff = 4'd8;
+            tree_index_eff = (bank_q ? {{(INDEX_W-8){1'b0}}, 8'd128} : {INDEX_W{1'b0}})
+                           + (index_q >> 1);
+        end else begin
+            tree_level_eff = level_q + 1'b1;
+            tree_index_eff = (bank_q ? ({{(INDEX_W-1){1'b0}}, 1'b1} << level_q) : {INDEX_W{1'b0}})
+                           + index_q;
+        end
+    end
+
+    always @(*) begin
+        // Falcon tree memory is laid out as fixed buckets:
+        //   level 0 : 1 polynomial  * 256 words
+        //   level 1 : 2 polynomials * 128 words
+        //   ...
+        //   level 8 : 256 scalar-pair entries
+        //   level 9 : 512 leaf sigma entries
+        case (tree_level_eff)
+            4'd0: tree_ofs = {ADDR_W{1'b0}} + (tree_index_eff << 8);
+            4'd1: tree_ofs = {{(ADDR_W-9){1'b0}}, 9'd256} + (tree_index_eff << 7);
+            4'd2: tree_ofs = {{(ADDR_W-10){1'b0}}, 10'd512} + (tree_index_eff << 6);
+            4'd3: tree_ofs = {{(ADDR_W-10){1'b0}}, 10'd768} + (tree_index_eff << 5);
+            4'd4: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1024} + (tree_index_eff << 4);
+            4'd5: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1280} + (tree_index_eff << 3);
+            4'd6: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1536} + (tree_index_eff << 2);
+            4'd7: tree_ofs = {{(ADDR_W-11){1'b0}}, 11'd1792} + (tree_index_eff << 1);
+            4'd8: tree_ofs = {{(ADDR_W-12){1'b0}}, 12'd2048} + tree_index_eff;
+            default: tree_ofs = {{(ADDR_W-12){1'b0}}, 12'd2304} + tree_index_eff;
+        endcase
+    end
+
     wire [ADDR_W-1:0] tree_addr = cfg_tree_base + tree_ofs;
 
+    // SPLIT consumes the current node input and l10. For the scalar-pair split,
+    // the output is redirected to flat scalar storage instead of compact z_addr.
     wire [ADDR_W-1:0] split_src0 = input_addr;
     wire [ADDR_W-1:0] split_src1 = tree_addr;
-    wire [ADDR_W-1:0] split_dst  = z_addr;
+    wire [ADDR_W-1:0] split_dst  = at_scalar_split ? scalar_pair_addr : z_addr;
+    wire [ADDR_W-1:0] preserve_src = at_scalar_split ? (scalar_pair_addr + 1'b1)
+                                                     : (z_addr + pair_cnt_for_adj);
 
-    wire [ADDR_W-1:0] sample_src0 = input_addr;
+    // SAMPLE consumes one scalar t value and its sigma entry. Internal nodes do
+    // not sample directly, but these aliases keep dynamic-tree task packing
+    // using the same task format.
+    wire [ADDR_W-1:0] sample_src0 = at_leaf ? scalar_leaf_addr : input_addr;
     wire [ADDR_W-1:0] sample_src1 = tree_addr;
-    wire [ADDR_W-1:0] sample_dst  = z_addr;
+    // Scalar leaf SAMPLE: write z to TMP (preserves t0/t1 at scalar_pair_addr for ADJUST).
+    wire [ADDR_W-1:0] sample_dst  = at_leaf ? tmp_leaf_addr : z_addr;
 
-    wire [ADDR_W-1:0] merge_src0 = z_addr;
+    // Child MERGE writes to TMP instead of z_area, preserving SPLIT t1 for
+    // ADJUST. A child node's own compact tmp_addr already includes its path
+    // offset, so a right child lands at parent_tmp + parent_stride.
+    wire [ADDR_W-1:0] merge_dst_child = tmp_addr;
+    wire [ADDR_W-1:0] merge_dst  = at_root ? z_addr : merge_dst_child;
+    // Parent MERGE reads both children's z from TMP.
+    wire [ADDR_W-1:0] merge_src0 = at_scalar_split ? tmp_scalar_pair_addr : tmp_addr;
     wire [ADDR_W-1:0] merge_src1 = tree_addr;
-    wire [ADDR_W-1:0] merge_dst  = z_addr;
 
-    wire              outer_root_adjust = at_root && bank_q && root_z1_merged_q;
-    // inner ADJUST: right child's t1/z1 live in z area at offset pair_cnt_for_adj
-    // (SPLIT wrote right child to dst+pair_limit). Use z_addr, not input_addr,
-    // to avoid corrupting original t data needed by outer_root_adjust.
+    // ADJUST source convention:
+    // - inner ADJUST reads preserved split-right t1 and the right-child z from
+    //   TMP, then updates the left input staged in z_area/scalar_pair_addr.
+    // - outer_root_adjust reads full root t1/z1 regions and writes back to t0.
     wire [ADDR_W-1:0] adj_src0 = outer_root_adjust ? (cfg_t_base + component_words)
-                                                   : (z_addr + pair_cnt_for_adj);
+                                                   : (at_scalar_split ? (scalar_pair_addr + 1'b1)
+                                                                      : preserve_addr);
     wire [ADDR_W-1:0] adj_src1 = outer_root_adjust ? (cfg_z_base + component_words)
-                                                   : (z_addr + pair_cnt_for_adj);
-    wire [ADDR_W-1:0] adj_dst  = outer_root_adjust ? cfg_t_base : z_addr;
+                                                   : (at_scalar_split ? (tmp_scalar_pair_addr + 1'b1)
+                                                                      : (tmp_addr + pair_cnt_for_adj));
+    wire [ADDR_W-1:0] adj_dst  = outer_root_adjust ? cfg_t_base
+                                                   : (at_scalar_split ? scalar_pair_addr : z_addr);
 
     assign src0_addr = sample_src0;
     assign src1_addr = sample_src1;
@@ -270,18 +398,24 @@ module falconsign_ffsampling_task_update #
             task_valid = 1'b1;
             case (state_q)
                 ST_RIGHT_DOWN: begin
+                    // Descending into a right branch: split/read this node if
+                    // internal, otherwise sample the leaf.
                     if (at_leaf) begin
                         task_word = pack_task(OP_SAMPLE_PAIR, level_q, index_q, sample_src0, sample_src1, sample_dst, 8'h00);
                     end else if (cfg_dynamic_tree && (sub_q == SUB_LDL)) begin
                         task_word = pack_task(OP_DYNAMIC_LDL, level_q, index_q, src0_addr, src1_addr, dst_addr, 8'h00);
                     end else if (sub_q == SUB_READ) begin
                         task_word = pack_task(OP_READ_L10, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                    end else if (sub_q == SUB_PRESERVE) begin
+                        task_word = pack_task(OP_COPY, level_q, index_q, preserve_src, tree_addr, preserve_addr, 8'h00);
                     end else begin
                         task_word = pack_task(OP_SPLIT_T1, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
                     end
                 end
 
                 ST_RIGHT_UP: begin
+                    // Right subtree is complete, so compute the Falcon adjust
+                    // before scheduling the left subtree.
                     task_word = pack_adjust_task(level_q, adj_dst, adj_src0, tree_addr, adj_src1,
                                                  outer_root_adjust);
 `ifndef SYNTHESIS
@@ -296,18 +430,24 @@ module falconsign_ffsampling_task_update #
                 end
 
                 ST_LEFT_DOWN: begin
+                    // Same preparation sequence as RIGHT_DOWN, but the next
+                    // descent target is the left child in the FSM update.
                     if (at_leaf) begin
                         task_word = pack_task(OP_SAMPLE_PAIR, level_q, index_q, sample_src0, sample_src1, sample_dst, 8'h00);
                     end else if (cfg_dynamic_tree && (sub_q == SUB_LDL)) begin
                         task_word = pack_task(OP_DYNAMIC_LDL, level_q, index_q, src0_addr, src1_addr, dst_addr, 8'h00);
                     end else if (sub_q == SUB_READ) begin
                         task_word = pack_task(OP_READ_L10, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                    end else if (sub_q == SUB_PRESERVE) begin
+                        task_word = pack_task(OP_COPY, level_q, index_q, preserve_src, tree_addr, preserve_addr, 8'h00);
                     end else begin
                         task_word = pack_task(OP_SPLIT_T1, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
                     end
                 end
 
                 ST_LEFT_UP: begin
+                    // Both children under this node are ready; merge z0/z1
+                    // toward the parent.
                     task_word = pack_task(OP_MERGE_Z, level_q, index_q, merge_src0, merge_src1, merge_dst, 8'h00);
                 end
 
@@ -318,6 +458,14 @@ module falconsign_ffsampling_task_update #
         end
     end
 
+    // Generic task word format:
+    //   [67:64] opcode
+    //   [63:60] level
+    //   [59:50] index
+    //   [49:36] src0
+    //   [35:22] src1
+    //   [21:8]  dst
+    //   [7:0]   aux
     function [67:0] pack_task;
         input [3:0]          opcode;
         input [LEVEL_W-1:0]  level;
@@ -338,6 +486,12 @@ module falconsign_ffsampling_task_update #
         end
     endfunction
 
+    // ADJUST overloads the generic fields so EXU can reconstruct all three
+    // addresses plus the full t0 destination:
+    //   index    = t0_dst[9:0]
+    //   aux[7:4] = t0_dst[13:10]
+    //   aux[0]   = root_full, selecting full root length instead of the
+    //              normal child half-size length.
     function [67:0] pack_adjust_task;
         input [LEVEL_W-1:0]  level;
         input [ADDR_W-1:0]   t0_dst;
@@ -350,7 +504,7 @@ module falconsign_ffsampling_task_update #
             t0_dst_ext = {{(14-ADDR_W){1'b0}}, t0_dst};
             pack_adjust_task = pack_task(OP_ADJUST_T0, level, t0_dst[9:0],
                                          t1_src, l10_src, z1_src,
-                                         {1'b0, 3'd0, t0_dst_ext[13:10]});
+                                         {t0_dst_ext[13:10], 3'd0, root_full});
         end
     endfunction
 
@@ -384,11 +538,17 @@ module falconsign_ffsampling_task_update #
                     busy   <= 1'b0;
                     status <= 8'h00;
                     if (start) begin
+                        // cfg_depth is the Falcon recursion depth. Depth 9 is
+                        // the normal Falcon-512 path; the guard catches invalid
+                        // bring-up configurations before any task is emitted.
                         if ((cfg_depth == {LEVEL_W{1'b0}}) || (cfg_depth > 4'd10)) begin
                             fail_status_q <= 8'hE1;
                             busy          <= 1'b1;
                             run_state     <= RUN_FAIL;
                         end else begin
+                            // Start every signature at the root of the t1/z1
+                            // pass. Dynamic-tree mode inserts LDL before the
+                            // normal READ/SPLIT sequence at each internal node.
                             level_q   <= {LEVEL_W{1'b0}};
                             index_q   <= {INDEX_W{1'b0}};
                             state_q   <= ST_RIGHT_DOWN;
@@ -403,6 +563,8 @@ module falconsign_ffsampling_task_update #
 
                 RUN_EMIT: begin
                     if (task_valid && task_ready) begin
+                        // Remember the accepted opcode so the WAIT state can
+                        // advance the traversal when the EXU completes.
                         issued_op_q <= task_word[67:64];
                         run_state   <= RUN_WAIT;
                     end
@@ -411,16 +573,42 @@ module falconsign_ffsampling_task_update #
                 RUN_WAIT: begin
                     if (task_done) begin
                         if (task_fail) begin
+                            // Propagate EXU/SamplerZ failure status unchanged;
+                            // top-level control can decide whether to restart.
                             fail_status_q <= task_status;
                             run_state     <= RUN_FAIL;
                         end else begin
                             if (issued_op_q == OP_DYNAMIC_LDL) begin
+                                // Dynamic LDL only prepares tree data for this
+                                // node; continue with the regular l10 read.
                                 sub_q     <= SUB_READ;
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_READ_L10) begin
+                                // l10 is now staged in EXU-side resources; the
+                                // next task can use it for SPLIT.
                                 sub_q     <= SUB_SPLIT;
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_SPLIT_T1) begin
+                                if (!at_scalar_split) begin
+                                    // Internal split: save the right split half
+                                    // before descending, because right sampling
+                                    // uses the same z/TMP scratch space.
+                                    sub_q     <= SUB_PRESERVE;
+                                    run_state <= RUN_EMIT;
+                                end else begin
+                                    // Scalar split already left both scalar
+                                    // inputs in z_area; descend directly to the
+                                    // right scalar leaf.
+                                    level_q   <= child_level;
+                                    index_q   <= right_child_index;
+                                    state_q   <= ST_RIGHT_DOWN;
+                                    sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
+                                    run_state <= RUN_EMIT;
+                                end
+                            end else if (issued_op_q == OP_COPY) begin
+                                // The split-right half is preserved; descend
+                                // into the right child first, matching Falcon's
+                                // recursive order.
                                 level_q   <= child_level;
                                 index_q   <= right_child_index;
                                 state_q   <= ST_RIGHT_DOWN;
@@ -428,6 +616,9 @@ module falconsign_ffsampling_task_update #
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_ADJUST_T0) begin
                                 if (outer_root_adjust) begin
+                                    // z1 is complete and t0 has just been root
+                                    // adjusted. Restart the traversal for the
+                                    // second top-level component, z0.
                                     bank_q    <= 1'b0;
                                     level_q   <= {LEVEL_W{1'b0}};
                                     index_q   <= {INDEX_W{1'b0}};
@@ -435,6 +626,8 @@ module falconsign_ffsampling_task_update #
                                     sub_q     <= cfg_dynamic_tree ? SUB_LDL : SUB_READ;
                                     root_z1_merged_q <= 1'b0;
                                 end else begin
+                                    // Ordinary adjust completed after the right
+                                    // subtree, so now sample the left subtree.
                                     level_q   <= child_level;
                                     index_q   <= left_child_index;
                                     state_q   <= ST_LEFT_DOWN;
@@ -442,6 +635,8 @@ module falconsign_ffsampling_task_update #
                                 end
                                 run_state <= RUN_EMIT;
                             end else if (issued_op_q == OP_SAMPLE_PAIR) begin
+                                // A leaf returns to its parent. Right leaves
+                                // trigger ADJUST; left leaves trigger MERGE.
                                 level_q   <= parent_level;
                                 index_q   <= parent_index;
                                 state_q   <= from_right_child ? ST_RIGHT_UP : ST_LEFT_UP;
@@ -450,17 +645,22 @@ module falconsign_ffsampling_task_update #
                             end else if (issued_op_q == OP_MERGE_Z) begin
                                 if (at_root) begin
                                     if (bank_q && !root_z1_merged_q) begin
+                                        // First root merge produced full z1.
+                                        // Emit the special root ADJUST next.
                                         root_z1_merged_q <= 1'b1;
                                         state_q          <= ST_RIGHT_UP;
                                         sub_q            <= SUB_READ;
                                         run_state        <= RUN_EMIT;
                                     end else begin
+                                        // Second root merge produced full z0;
+                                        // ffSampling is complete.
                                         run_state <= RUN_DONE;
                                     end
                                 end else begin
+                                    // Non-root merge returns to the parent.
                                     level_q   <= parent_level;
                                     index_q   <= parent_index;
-                                    state_q   <= from_right_child ? ST_RIGHT_UP : ST_LEFT_UP;
+                                    state_q <= from_right_child ? ST_RIGHT_UP : ST_LEFT_UP;
                                     sub_q     <= SUB_READ;
                                     run_state <= RUN_EMIT;
                                 end

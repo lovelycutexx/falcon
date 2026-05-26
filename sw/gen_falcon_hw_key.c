@@ -561,9 +561,10 @@ int main(void) {
     printf("\nPublic key h computed (mod q, %zu coefficients)\n", n);
 
     /* ─── Step 3: Convert h to NTT + Montgomery format ─── */
+    write_u16_hex("h_ntt.hex", h, n, "h raw mod-q coefficients for RTL NTT");
     Zf(to_ntt_monty)(h, logn);
-    write_u16_hex("h_ntt.hex", h, n, "h (NTT+Montgomery)");
-    printf("Public key h converted to NTT+Montgomery format\n");
+    write_u16_hex("h_ntt_monty.hex", h, n, "h (NTT+Montgomery reference)");
+    printf("Public key h written raw for RTL and converted reference to NTT+Montgomery\n");
 
     /* ─── Step 4: Hash a test message to get challenge c ─── */
     static const uint8_t rtl_msg[32] = {

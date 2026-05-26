@@ -83,7 +83,84 @@ module tb_samplerz_fpu;
 
     // ─── Test ───
     integer i, accepted, rejected, cycles;
+    integer case_total, case_timeouts, case_rejects, case_attempts, case_cycles, case_max_rejects;
+    integer all_total, all_timeouts, all_rejects, all_attempts, all_cycles;
     real    mu_r, z_r, sigma_r;
+
+    task run_case;
+        input [511:0] name;
+        input [63:0]  mu_bits;
+        input [63:0]  sigma_inv_bits;
+        input [63:0]  sigma_min_bits;
+        input integer count;
+        input         pair_mode;
+        begin
+            $display("\n--- %0s count=%0d pair=%0d ---", name, count, pair_mode);
+            cmd_mu        = mu_bits;
+            cmd_sigma_inv = sigma_inv_bits;
+            cmd_sigma_min = sigma_min_bits;
+            cmd_pair_mode = pair_mode;
+
+            case_total = 0;
+            case_timeouts = 0;
+            case_rejects = 0;
+            case_attempts = 0;
+            case_cycles = 0;
+            case_max_rejects = 0;
+
+            for (i = 0; i < count; i = i + 1) begin
+                @(posedge clk);
+                cmd_valid <= 1'b1;
+                wait (cmd_ready);
+                @(posedge clk);
+                cmd_valid <= 1'b0;
+
+                cycles = 0;
+                while (!rsp_valid && cycles < 50000) begin
+                    @(posedge clk);
+                    cycles = cycles + 1;
+                end
+
+                if (rsp_valid && rsp_accept) begin
+                    mu_r = $bitstoreal(cmd_mu);
+                    z_r  = $bitstoreal(rsp_z0);
+                    sigma_r = 1.0 / $bitstoreal(cmd_sigma_inv);
+                    if (i < 4) begin
+                        $display("  [%0d] z0=%0.1f mu=%0.1f diff=%0.1f sigma=%.2f cycles=%0d rejects=%0d attempts=%0d",
+                            i, z_r, mu_r, (z_r>mu_r ? z_r-mu_r : mu_r-z_r), sigma_r,
+                            cycles, u_sz.debug_cmd_rejects, u_sz.debug_cmd_attempts);
+                    end
+                    accepted = accepted + 1;
+                    case_total = case_total + 1;
+                    case_rejects = case_rejects + u_sz.debug_cmd_rejects;
+                    case_attempts = case_attempts + u_sz.debug_cmd_attempts;
+                    case_cycles = case_cycles + cycles;
+                    if (u_sz.debug_cmd_rejects > case_max_rejects)
+                        case_max_rejects = u_sz.debug_cmd_rejects;
+                end else begin
+                    $display("  [%0d] TIMEOUT/REJECT rsp=%0d accept=%0d state=%0d", i, rsp_valid, rsp_accept, u_sz.st);
+                    rejected = rejected + 1;
+                    case_timeouts = case_timeouts + 1;
+                end
+                @(posedge clk);
+            end
+
+            all_total = all_total + case_total;
+            all_timeouts = all_timeouts + case_timeouts;
+            all_rejects = all_rejects + case_rejects;
+            all_attempts = all_attempts + case_attempts;
+            all_cycles = all_cycles + case_cycles;
+
+            if (case_total != 0) begin
+                $display("  SUMMARY accepted=%0d timeouts=%0d total_rejects=%0d total_attempts=%0d max_rejects=%0d",
+                    case_total, case_timeouts, case_rejects, case_attempts, case_max_rejects);
+                $display("  AVG rejects/cmd=%0d.%03d attempts/cmd=%0d.%03d cycles/cmd=%0d.%03d",
+                    case_rejects / case_total, ((case_rejects * 1000) / case_total) % 1000,
+                    case_attempts / case_total, ((case_attempts * 1000) / case_total) % 1000,
+                    case_cycles / case_total, ((case_cycles * 1000) / case_total) % 1000);
+            end
+        end
+    endtask
 
     initial begin
         rst_n = 1'b0;
@@ -91,118 +168,33 @@ module tb_samplerz_fpu;
         rsp_ready = 1'b1;
         accepted = 0;
         rejected = 0;
+        all_total = 0;
+        all_timeouts = 0;
+        all_rejects = 0;
+        all_attempts = 0;
+        all_cycles = 0;
 
         repeat (10) @(posedge clk);
         rst_n = 1'b1;
         repeat (5) @(posedge clk);
 
         $display("=== SamplerZ + Real FPU Test ===");
-
-        // Test 1: mu=5.0, sigma_inv=0.7
-        $display("\n--- Test 1: mu=5.0, sigma_inv=0.7 ---");
-        cmd_mu        = 64'h4014000000000000;
-        cmd_sigma_inv = 64'h3fe6666666666666;
-        cmd_sigma_min = 64'h3ff3333333333333;
-        cmd_pair_mode = 1'b0;
-
-        for (i = 0; i < 10; i = i + 1) begin
-            @(posedge clk);
-            cmd_valid <= 1'b1;
-            wait (cmd_ready);
-            @(posedge clk);
-            cmd_valid <= 1'b0;
-
-            cycles = 0;
-            while (!rsp_valid && cycles < 50000) begin
-                @(posedge clk);
-                cycles = cycles + 1;
-            end
-
-            if (rsp_valid) begin
-                mu_r = $bitstoreal(cmd_mu);
-                z_r  = $bitstoreal(rsp_z0);
-                sigma_r = 1.0 / $bitstoreal(cmd_sigma_inv);
-                if (rsp_accept) begin
-                    $display("  [%0d] z=%0.1f mu=%0.1f |z-mu|=%0.1f sigma=%.2f cycles=%0d ACCEPT",
-                        i, z_r, mu_r, (z_r>mu_r ? z_r-mu_r : mu_r-z_r), sigma_r, cycles);
-                    accepted = accepted + 1;
-                end else begin
-                    rejected = rejected + 1;
-                end
-            end else begin
-                $display("  [%0d] TIMEOUT (state=%0d)", i, u_sz.st);
-                rejected = rejected + 1;
-            end
-            @(posedge clk);
-        end
-
-        // Test 2: mu from realistic tree leaf
-        $display("\n--- Test 2: mu=120.0 (typical leaf), sigma_inv=0.77 (tree value) ---");
-        cmd_mu        = 64'h405e000000000000;  // 120.0
-        cmd_sigma_inv = 64'h3fe8a58ba9052ab4;  // ~0.77 (from real tree)
-        cmd_sigma_min = 64'h3ff3333333333333;
-
-        for (i = 0; i < 10; i = i + 1) begin
-            @(posedge clk);
-            cmd_valid <= 1'b1;
-            wait (cmd_ready);
-            @(posedge clk);
-            cmd_valid <= 1'b0;
-
-            cycles = 0;
-            while (!rsp_valid && cycles < 50000) begin
-                @(posedge clk);
-                cycles = cycles + 1;
-            end
-
-            if (rsp_valid && rsp_accept) begin
-                mu_r = $bitstoreal(cmd_mu);
-                z_r  = $bitstoreal(rsp_z0);
-                sigma_r = 1.0 / $bitstoreal(cmd_sigma_inv);
-                $display("  [%0d] z=%0.1f mu=%0.1f diff=%0.1f sigma=%.2f cycles=%0d ACCEPT",
-                    i, z_r, mu_r, (z_r>mu_r ? z_r-mu_r : mu_r-z_r), sigma_r, cycles);
-                accepted = accepted + 1;
-            end else if (!rsp_valid) begin
-                $display("  [%0d] TIMEOUT (state=%0d)", i, u_sz.st);
-                rejected = rejected + 1;
-            end
-            @(posedge clk);
-        end
-
-        // Test 3: mu=2500 (larger leaf value)
-        $display("\n--- Test 3: mu=2500.0, sigma_inv=0.77 ---");
-        cmd_mu        = 64'h40a3880000000000;  // 2500.0
-        cmd_sigma_inv = 64'h3fe8a58ba9052ab4;
-        cmd_sigma_min = 64'h3ff3333333333333;
-
-        for (i = 0; i < 10; i = i + 1) begin
-            @(posedge clk);
-            cmd_valid <= 1'b1;
-            wait (cmd_ready);
-            @(posedge clk);
-            cmd_valid <= 1'b0;
-
-            cycles = 0;
-            while (!rsp_valid && cycles < 50000) begin
-                @(posedge clk);
-                cycles = cycles + 1;
-            end
-
-            if (rsp_valid && rsp_accept) begin
-                mu_r = $bitstoreal(cmd_mu);
-                z_r  = $bitstoreal(rsp_z0);
-                sigma_r = 1.0 / $bitstoreal(cmd_sigma_inv);
-                $display("  [%0d] z=%0.1f mu=%0.1f diff=%0.1f sigma=%.2f cycles=%0d ACCEPT",
-                    i, z_r, mu_r, (z_r>mu_r ? z_r-mu_r : mu_r-z_r), sigma_r, cycles);
-                accepted = accepted + 1;
-            end else if (!rsp_valid) begin
-                $display("  [%0d] TIMEOUT (state=%0d)", i, u_sz.st);
-                rejected = rejected + 1;
-            end
-            @(posedge clk);
-        end
+        run_case("center small mu=5 sigma_inv=0.70", 64'h4014000000000000, 64'h3fe6666666666666, 64'h3ff3333333333333, 32, 1'b0);
+        run_case("tree leaf mu=120 sigma_inv=0.77", 64'h405e000000000000, 64'h3fe8a58ba9052ab4, 64'h3ff3333333333333, 32, 1'b0);
+        run_case("large mu=2500 sigma_inv=0.77", 64'h40a3880000000000, 64'h3fe8a58ba9052ab4, 64'h3ff3333333333333, 32, 1'b0);
+        run_case("negative mu=-37.25 sigma_inv=0.77", 64'hc042a00000000000, 64'h3fe8a58ba9052ab4, 64'h3ff3333333333333, 32, 1'b0);
+        run_case("wider sigma mu=0 sigma_inv=0.50", 64'h0000000000000000, 64'h3fe0000000000000, 64'h3ff3333333333333, 32, 1'b0);
+        run_case("pair mode mu=120 sigma_inv=0.77", 64'h405e000000000000, 64'h3fe8a58ba9052ab4, 64'h3ff3333333333333, 16, 1'b1);
 
         $display("\n=== Results: %0d accepted, %0d rejected ===", accepted, rejected);
+        if (all_total != 0) begin
+            $display("=== Aggregate accepted_cmds=%0d timeouts=%0d rejects=%0d attempts=%0d ===",
+                all_total, all_timeouts, all_rejects, all_attempts);
+            $display("=== Aggregate avg_rejects/cmd=%0d.%03d avg_attempts/cmd=%0d.%03d avg_cycles/cmd=%0d.%03d ===",
+                all_rejects / all_total, ((all_rejects * 1000) / all_total) % 1000,
+                all_attempts / all_total, ((all_attempts * 1000) / all_total) % 1000,
+                all_cycles / all_total, ((all_cycles * 1000) / all_total) % 1000);
+        end
         if (rejected == 0)
             $display("SamplerZ+FPU PASSED");
         else

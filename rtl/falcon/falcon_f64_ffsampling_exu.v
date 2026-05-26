@@ -49,6 +49,7 @@ localparam [3:0] OP_SPLIT    = 4'd1;
 localparam [3:0] OP_ADJUST   = 4'd2;
 localparam [3:0] OP_SAMPLE   = 4'd3;
 localparam [3:0] OP_MERGE    = 4'd4;
+localparam [3:0] OP_COPY     = 4'd6;
 
 localparam [5:0] ST_IDLE       = 6'd0;
 localparam [5:0] ST_READ_REQ   = 6'd1;
@@ -82,6 +83,12 @@ localparam [5:0] ST_ADJ_L_CAP      = 6'd28;
 localparam [5:0] ST_ADJ_MIRROR_WR  = 6'd29;
 localparam [5:0] ST_PAIR_MIR0      = 6'd30;
 localparam [5:0] ST_PAIR_MIR1      = 6'd31;
+localparam [5:0] ST_SPLIT_PREF_REQ = 6'd32;
+localparam [5:0] ST_SPLIT_PREF_CAP = 6'd33;
+localparam [5:0] ST_SPLIT_BUF_LOAD = 6'd34;
+localparam [5:0] ST_MERGE_BUF_LOAD = 6'd35;
+localparam [5:0] ST_COPY_REQ       = 6'd36;
+localparam [5:0] ST_COPY_CAP       = 6'd37;
 
 localparam [3:0] FADD  = 4'd0;
 localparam [3:0] FSUB  = 4'd1;
@@ -96,6 +103,8 @@ reg [3:0] level_q;
 reg [ADDR_W-1:0] src0_q, src1_q, dst_q, l_base_q;
 reg [ADDR_W-1:0] adj_t0_base_q;
 reg [ADDR_W-1:0] pair_limit_q;
+reg [ADDR_W-1:0] l_half_q;
+reg               adj_root_full_q;
 reg [ADDR_W-1:0] idx_q;
 reg [2:0] lane_q;
 reg [3:0] phase_q;
@@ -115,6 +124,9 @@ reg [63:0] tmp_q;
 reg [63:0] sample_z0_q, sample_z1_q;
 reg [63:0] sample_mu0_q, sample_mu1_q;
 reg [63:0] sample_sig0_q, sample_sig1_q;
+reg [ADDR_W-1:0] split_words_q;
+reg [63:0] split_re_buf [0:255];
+reg [63:0] split_im_buf [0:255];
 
 `ifndef SYNTHESIS
 reg debug_adjust_nop;
@@ -125,9 +137,12 @@ initial debug_trace_exu = $test$plusargs("FS_TRACE_EXU");
 
 wire [ADDR_W-1:0] adj_t0_base = adj_t0_base_q;
 wire [ADDR_W-1:0] adj_mirror_addr = adj_t0_base_q + (pair_limit_q << 1) - 1'b1 - idx_q;
+wire               adj_l_mirror = (!adj_root_full_q) && (idx_q >= l_half_q);
+wire [ADDR_W-1:0] adj_l_index = adj_l_mirror ? ((pair_limit_q - 1'b1) - idx_q) : idx_q;
 wire [ADDR_W-1:0] merge_mirror_base = dst_q + (pair_limit_q << 2) - 1'b1;
 wire [ADDR_W-1:0] merge_mirror_addr0 = merge_mirror_base - (idx_q << 1);
 wire [ADDR_W-1:0] merge_mirror_addr1 = merge_mirror_base - ((idx_q << 1) + 1'b1);
+wire [ADDR_W-1:0] merge_buf_index = pair_limit_q + idx_q;
 
 function [ADDR_W-1:0] pair_count_from_level;
     input [3:0] level;
@@ -135,21 +150,30 @@ function [ADDR_W-1:0] pair_count_from_level;
         if (level >= 4'd8) begin
             pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
         end else begin
-            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
+            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - level);
         end
     end
 endfunction
 
 function [ADDR_W-1:0] word_count_from_level;
     input [3:0] level;
-    reg [ADDR_W-1:0] raw_count;
     begin
-        if (level >= 4'd9) begin
-            raw_count = {{(ADDR_W-1){1'b0}}, 1'b1};
+        if (level >= 4'd8) begin
+            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
         end else begin
-            raw_count = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd9 - level);
+            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
         end
-        word_count_from_level = (raw_count < 2) ? {{(ADDR_W-2){1'b0}}, 2'd2} : (raw_count >> 1);
+    end
+endfunction
+
+function [ADDR_W-1:0] raw_word_count_from_level;
+    input [3:0] level;
+    begin
+        if (level >= 4'd8) begin
+            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
+        end else begin
+            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
+        end
     end
 endfunction
 
@@ -220,6 +244,12 @@ always @(*) begin
             end
         end
 
+        ST_SPLIT_PREF_REQ,
+        ST_SPLIT_PREF_CAP: begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = src0_q + idx_q;
+        end
+
         ST_PAIR_B_REQ,
         ST_PAIR_B_CAP: begin
             mem_rd_en = 1'b1;
@@ -252,7 +282,7 @@ always @(*) begin
         ST_ADJ_L_REQ,
         ST_ADJ_L_CAP: begin
             mem_rd_en   = 1'b1;
-            mem_rd_addr = l_base_q + idx_q;
+            mem_rd_addr = l_base_q + adj_l_index;
         end
 
         ST_SAMPLE_MU_REQ,
@@ -265,6 +295,11 @@ always @(*) begin
         ST_SAMPLE_SIG_CAP: begin
             mem_rd_en   = 1'b1;
             mem_rd_addr = src1_q;
+        end
+
+        ST_COPY_REQ: begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = src0_q + idx_q;
         end
 
         ST_FPU_REQ: begin
@@ -311,7 +346,7 @@ always @(*) begin
             mem_wr_en = 1'b1;
             if (op_q == OP_SPLIT) begin
                 mem_wr_addr = dst_q + idx_q;
-                if (level_q >= 4'd9) begin
+                if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_re_q};
                 end else begin
                     mem_wr_data = {128'd0, f64_half(sum_im_q), f64_half(sum_re_q)};
@@ -336,7 +371,7 @@ always @(*) begin
             mem_wr_en = 1'b1;
             if (op_q == OP_SPLIT) begin
                 mem_wr_addr = dst_q + pair_limit_q + idx_q;
-                if (level_q >= 4'd9) begin
+                if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_im_q};
                 end else begin
                     mem_wr_data = {128'd0, f64_half(rot_im_q), f64_half(rot_re_q)};
@@ -374,7 +409,7 @@ always @(*) begin
             mem_wr_addr = adj_t0_base + idx_q;
             mem_wr_data = {128'd0, out0_im_q, out0_re_q};
 `ifndef SYNTHESIS
-            if (debug_trace_exu && (level_q <= 4'd0) && (idx_q < 2)) begin
+            if (debug_trace_exu && ((level_q <= 4'd0) || (level_q >= 4'd7)) && (idx_q < 2)) begin
                 $display("  FE_ADJ_WR L=%0d I=%0d addr=%0d data=%h", level_q, idx_q, mem_wr_addr, mem_wr_data);
             end
 `endif
@@ -398,6 +433,14 @@ always @(*) begin
             mem_wr_addr = dst_q;
             mem_wr_data = {128'd0, sample_z1_q, sample_z0_q};
         end
+
+        ST_COPY_CAP: begin
+            mem_rd_en   = 1'b1;
+            mem_rd_addr = src0_q + idx_q;
+            mem_wr_en   = 1'b1;
+            mem_wr_addr = dst_q + idx_q;
+            mem_wr_data = mem_rd_data;
+        end
     endcase
 end
 
@@ -415,6 +458,8 @@ always @(posedge clk or negedge rst_n) begin
         l_base_q     <= {ADDR_W{1'b0}};
         adj_t0_base_q <= {ADDR_W{1'b0}};
         pair_limit_q <= {ADDR_W{1'b0}};
+        l_half_q     <= {ADDR_W{1'b0}};
+        adj_root_full_q <= 1'b0;
         idx_q        <= {ADDR_W{1'b0}};
         lane_q       <= 3'd0;
         phase_q      <= 4'd0;
@@ -447,6 +492,7 @@ always @(posedge clk or negedge rst_n) begin
         sample_mu1_q <= 64'd0;
         sample_sig0_q <= 64'd0;
         sample_sig1_q <= 64'd0;
+        split_words_q <= {ADDR_W{1'b0}};
     end else begin
         task_done   <= 1'b0;
         task_fail   <= 1'b0;
@@ -461,18 +507,39 @@ always @(posedge clk or negedge rst_n) begin
                     src1_q       <= task_word[35:22];
                     dst_q        <= task_word[21:8];
                     pair_limit_q <= pair_count_from_level(task_word[63:60]);
+                    adj_root_full_q <= 1'b0;
                     idx_q        <= {ADDR_W{1'b0}};
                     lane_q       <= 3'd0;
                     phase_q      <= 4'd0;
                     case (task_word[67:64])
                         OP_READ_L10: state <= ST_READ_REQ;
-                        OP_SPLIT:    state <= ST_PAIR_A_REQ;
-                        OP_MERGE:    state <= ST_PAIR_A_REQ;
+                        OP_SPLIT: begin
+                            if (task_word[63:60] >= 4'd8) begin
+                                state <= ST_PAIR_A_REQ;
+                            end else begin
+                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
+                                state         <= ST_SPLIT_PREF_REQ;
+                            end
+                        end
+                        OP_MERGE: begin
+                            if (task_word[63:60] >= 4'd8) begin
+                                state <= ST_PAIR_A_REQ;
+                            end else begin
+                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
+                                state         <= ST_SPLIT_PREF_REQ;
+                            end
+                        end
+                        OP_COPY: begin
+                            pair_limit_q <= pair_count_from_level(task_word[63:60]);
+                            idx_q        <= {ADDR_W{1'b0}};
+                            state        <= ST_COPY_REQ;
+                        end
                         OP_ADJUST: begin
-                            // task_word[7] doubles pair_limit for root-level full-polynomial ADJUST
-                            pair_limit_q <= task_word[7]
-                                ? (word_count_from_level(task_word[63:60]) << 1)
-                                : word_count_from_level(task_word[63:60]);
+                            adj_root_full_q <= task_word[0];
+                            pair_limit_q <= task_word[0] ? word_count_from_level(task_word[63:60])
+                                                          : pair_count_from_level(task_word[63:60]);
+                            l_half_q     <= task_word[0] ? word_count_from_level(task_word[63:60])
+                                                          : pair_count_from_level(task_word[63:60]);
                             l_base_q     <= task_word[35:22];
                             adj_t0_base_q <= {task_word[7:4], task_word[59:50]};
                             state        <= ST_ADJ_L_REQ;
@@ -505,8 +572,43 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_ADJ_L_CAP: begin
                 l_re_q <= mem_rd_data[63:0];
-                l_im_q <= mem_rd_data[127:64];
+                l_im_q <= adj_l_mirror ? f64_neg(mem_rd_data[127:64]) : mem_rd_data[127:64];
                 state  <= ST_ADJ_T1_REQ;
+            end
+
+            ST_SPLIT_PREF_REQ: begin
+                state <= ST_SPLIT_PREF_CAP;
+            end
+
+            ST_SPLIT_PREF_CAP: begin
+                split_re_buf[idx_q[7:0]] <= mem_rd_data[63:0];
+                split_im_buf[idx_q[7:0]] <= mem_rd_data[127:64];
+                if (idx_q == (split_words_q - 1'b1)) begin
+                    idx_q   <= {ADDR_W{1'b0}};
+                    phase_q <= 4'd0;
+                    state   <= (op_q == OP_SPLIT) ? ST_SPLIT_BUF_LOAD : ST_MERGE_BUF_LOAD;
+                end else begin
+                    idx_q <= idx_q + 1'b1;
+                    state <= ST_SPLIT_PREF_REQ;
+                end
+            end
+
+            ST_SPLIT_BUF_LOAD: begin
+                a_re_q  <= split_re_buf[(idx_q << 1)];
+                a_im_q  <= split_im_buf[(idx_q << 1)];
+                b_re_q  <= split_re_buf[(idx_q << 1) + 1'b1];
+                b_im_q  <= split_im_buf[(idx_q << 1) + 1'b1];
+                phase_q <= 4'd0;
+                state   <= ST_FPU_REQ;
+            end
+
+            ST_MERGE_BUF_LOAD: begin
+                a_re_q  <= split_re_buf[idx_q[7:0]];
+                a_im_q  <= split_im_buf[idx_q[7:0]];
+                b_re_q  <= split_re_buf[merge_buf_index[7:0]];
+                b_im_q  <= split_im_buf[merge_buf_index[7:0]];
+                phase_q <= 4'd4;
+                state   <= ST_FPU_REQ;
             end
 
             ST_PAIR_A_REQ: begin
@@ -521,7 +623,7 @@ always @(posedge clk or negedge rst_n) begin
                 $display("  FE_SPLIT_A level=%0d idx=%0d addr=%0d data=%h", level_q, idx_q, src0_q + (idx_q << 1), mem_rd_data);
             end
 `endif
-            if ((op_q == OP_SPLIT) && (level_q >= 4'd9)) begin
+            if ((op_q == OP_SPLIT) && (level_q >= 4'd8)) begin
                 state <= ST_PAIR_WR0;
             end else begin
                 state <= ST_PAIR_B_REQ;
@@ -540,7 +642,7 @@ always @(posedge clk or negedge rst_n) begin
                 $display("  FE_SPLIT_B level=%0d idx=%0d addr=%0d data=%h", level_q, idx_q, src0_q + (idx_q << 1) + 1'b1, mem_rd_data);
             end
 `endif
-            if ((op_q == OP_MERGE) && (level_q >= 4'd9)) begin
+            if ((op_q == OP_MERGE) && (level_q >= 4'd8)) begin
                 out0_re_q <= a_re_q;
                 out0_im_q <= mem_rd_data[63:0];
                 state     <= ST_PAIR_WR0;
@@ -578,13 +680,18 @@ always @(posedge clk or negedge rst_n) begin
                 t0_re_q <= mem_rd_data[63:0];
                 t0_im_q <= mem_rd_data[127:64];
 `ifndef SYNTHESIS
-                if (debug_trace_exu && (level_q <= 4'd0) && (idx_q < 2)) begin
+                if (debug_trace_exu && ((level_q <= 4'd0) || (level_q >= 4'd7)) && (idx_q < 2)) begin
                     $display("  FE_ADJ_IN L=%0d I=%0d: t0={%h,%h} t1={%h,%h} z1={%h,%h} l={%h,%h}",
                              level_q, idx_q,
                              mem_rd_data[63:0], mem_rd_data[127:64],
                              t1_re_q, t1_im_q,
                              z1_re_q, z1_im_q,
                              l_re_q, l_im_q);
+                end
+                if (debug_trace_exu && (idx_q == {ADDR_W{1'b0}}) &&
+                    ((t1_re_q !== z1_re_q) || (t1_im_q !== z1_im_q))) begin
+                    $display("  FE_ADJ_MISMATCH L=%0d: t1={%h,%h} z1={%h,%h}",
+                             level_q, t1_re_q, t1_im_q, z1_re_q, z1_im_q);
                 end
                 if (debug_adjust_nop) begin
                     out0_re_q <= mem_rd_data[63:0];
@@ -652,8 +759,10 @@ always @(posedge clk or negedge rst_n) begin
             end
 
             ST_PAIR_WR0: begin
-                if ((op_q == OP_MERGE) && (level_q >= 4'd9)) begin
+                if ((op_q == OP_MERGE) && (level_q >= 4'd8)) begin
                     state <= ST_DONE;
+                end else if ((op_q == OP_MERGE) && (level_q == 4'd0)) begin
+                    state <= ST_PAIR_MIR0;
                 end else begin
                     state <= ST_PAIR_WR1;
                 end
@@ -664,12 +773,20 @@ always @(posedge clk or negedge rst_n) begin
             end
 
             ST_PAIR_WR1: begin
-                if (idx_q == (pair_limit_q - 1'b1)) begin
+                if ((op_q == OP_MERGE) && (level_q == 4'd0)) begin
+                    state <= ST_PAIR_MIR1;
+                end else if (idx_q == (pair_limit_q - 1'b1)) begin
                     state <= ST_DONE;
                 end else begin
                     idx_q   <= idx_q + 1'b1;
                     phase_q <= 4'd0;
-                    state   <= ST_PAIR_A_REQ;
+                    if ((op_q == OP_SPLIT) && (level_q < 4'd8)) begin
+                        state <= ST_SPLIT_BUF_LOAD;
+                    end else if ((op_q == OP_MERGE) && (level_q < 4'd8)) begin
+                        state <= ST_MERGE_BUF_LOAD;
+                    end else begin
+                        state <= ST_PAIR_A_REQ;
+                    end
                 end
             end
 
@@ -679,15 +796,15 @@ always @(posedge clk or negedge rst_n) begin
                 end else begin
                     idx_q   <= idx_q + 1'b1;
                     phase_q <= 4'd0;
-                    state   <= ST_PAIR_A_REQ;
+                    if ((op_q == OP_MERGE) && (level_q < 4'd8)) begin
+                        state <= ST_MERGE_BUF_LOAD;
+                    end else begin
+                        state <= ST_PAIR_A_REQ;
+                    end
                 end
             end
 
             ST_ADJ_WR: begin
-                state <= ST_ADJ_MIRROR_WR;
-            end
-
-            ST_ADJ_MIRROR_WR: begin
                 if (idx_q == (pair_limit_q - 1'b1)) begin
                     state <= ST_DONE;
                 end else begin
@@ -704,7 +821,7 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_SAMPLE_MU_CAP: begin
                 sample_mu0_q <= mem_rd_data[63:0];
-                sample_mu1_q <= mem_rd_data[127:64];
+                sample_mu1_q <= 64'd0;
                 state        <= ST_SAMPLE_SIG_REQ;
             end
 
@@ -714,7 +831,7 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_SAMPLE_SIG_CAP: begin
                 sample_sig0_q <= mem_rd_data[63:0];
-                sample_sig1_q <= mem_rd_data[127:64];
+                sample_sig1_q <= 64'd0;
                 lane_q        <= 3'd0;
                 state         <= ST_SAMPLE_REQ;
             end
@@ -727,19 +844,27 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_SAMPLE_WAIT: begin
                 if (sz_rsp_valid) begin
-                    if (lane_q[0]) begin
-                        sample_z1_q <= sz_rsp_z0;
-                        state       <= ST_SAMPLE_WR;
-                    end else begin
-                        sample_z0_q <= sz_rsp_z0;
-                        lane_q      <= 3'd1;
-                        state       <= ST_SAMPLE_REQ;
-                    end
+                    sample_z0_q <= sz_rsp_z0;
+                    sample_z1_q <= 64'd0;
+                    state       <= ST_SAMPLE_WR;
                 end
             end
 
             ST_SAMPLE_WR: begin
                 state <= ST_DONE;
+            end
+
+            ST_COPY_REQ: begin
+                state <= ST_COPY_CAP;
+            end
+
+            ST_COPY_CAP: begin
+                if (idx_q == (pair_limit_q - 1'b1)) begin
+                    state <= ST_DONE;
+                end else begin
+                    idx_q <= idx_q + 1'b1;
+                    state <= ST_COPY_REQ;
+                end
             end
 
             ST_DONE: begin

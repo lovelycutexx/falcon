@@ -10,7 +10,9 @@ module tb_falconsign_ntt_exu;
     wire start_ready, done, fail;
     wire [7:0] status;
 
-    reg [ADDR_W-1:0] cfg_h_base, cfg_s2_base, cfg_c_base, cfg_dst_base;
+    reg [ADDR_W-1:0] cfg_h_base, cfg_h_work_base;
+    reg [ADDR_W-1:0] cfg_s2_base, cfg_s2_work_base;
+    reg [ADDR_W-1:0] cfg_c_base, cfg_dst_base;
 
     // Port B memory model
     wire        mem_rd_en;
@@ -23,6 +25,8 @@ module tb_falconsign_ntt_exu;
     reg [255:0] mem_s2   [0:N_WORDS-1];
     reg [255:0] mem_c    [0:N_WORDS-1];
     reg [255:0] mem_dst  [0:N_WORDS-1];
+    reg [255:0] mem_h_work  [0:N_WORDS-1];
+    reg [255:0] mem_s2_work [0:N_WORDS-1];
     reg [255:0] golden   [0:N_WORDS-1];
 
     wire [ADDR_W-1:0] rd_off;
@@ -32,7 +36,9 @@ module tb_falconsign_ntt_exu;
         mem_rd_data_comb = (rd_off < 32)  ? mem_h[rd_off]  :
                            (rd_off < 64)  ? mem_s2[rd_off-32] :
                            (rd_off < 96)  ? mem_c[rd_off-64]  :
-                           (rd_off < 128) ? mem_dst[rd_off-96] : 256'd0;
+                           (rd_off < 128) ? mem_dst[rd_off-96] :
+                           (rd_off < 160) ? mem_h_work[rd_off-128] :
+                           (rd_off < 192) ? mem_s2_work[rd_off-160] : 256'd0;
     end
     // Combinational read (Port B with 0-cycle latency for simplicity)
     wire [255:0] mem_rd_data;
@@ -54,7 +60,8 @@ module tb_falconsign_ntt_exu;
         .clk(clk), .rst_n(rst_n),
         .start(start), .start_ready(start_ready),
         .done(done), .fail(fail), .status(status),
-        .cfg_h_base(cfg_h_base), .cfg_s2_base(cfg_s2_base),
+        .cfg_h_base(cfg_h_base), .cfg_h_work_base(cfg_h_work_base),
+        .cfg_s2_base(cfg_s2_base), .cfg_s2_work_base(cfg_s2_work_base),
         .cfg_c_base(cfg_c_base), .cfg_dst_base(cfg_dst_base),
         .mem_rd_en(mem_rd_en), .mem_rd_addr(mem_rd_addr),
         .mem_rd_data(mem_rd_data),
@@ -73,6 +80,8 @@ module tb_falconsign_ntt_exu;
             if (mem_wr_addr >= 32 && mem_wr_addr < 64)  mem_s2[mem_wr_addr-32]  <= mem_wr_data;
             if (mem_wr_addr >= 64 && mem_wr_addr < 96)  mem_c[mem_wr_addr-64]   <= mem_wr_data;
             if (mem_wr_addr >= 96 && mem_wr_addr < 128) mem_dst[mem_wr_addr-96] <= mem_wr_data;
+            if (mem_wr_addr >= 128 && mem_wr_addr < 160) mem_h_work[mem_wr_addr-128] <= mem_wr_data;
+            if (mem_wr_addr >= 160 && mem_wr_addr < 192) mem_s2_work[mem_wr_addr-160] <= mem_wr_data;
         end
     end
 
@@ -89,6 +98,8 @@ module tb_falconsign_ntt_exu;
         cfg_s2_base = 32;
         cfg_c_base  = 64;
         cfg_dst_base= 96;
+        cfg_h_work_base = 128;
+        cfg_s2_work_base = 160;
         errors = 0;
 
         $readmemh("DOC/ntt_test_h.hex", mem_h);

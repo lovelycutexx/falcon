@@ -37,7 +37,7 @@ module falconsign_fpr_to_int16 #(
     reg [255:0] pack_word;
     reg last_coeff_q;
 
-    wire signed [15:0] coeff_i16 = f64_to_i16(mem_rd_data[63:0]);
+    wire signed [15:0] coeff_i16 = f64_to_i16(f64_neg(mem_rd_data[63:0]));
     wire last_lane = (lane_idx == 4'd15);
     wire last_coeff = (coeff_idx == (coeff_count - 1'b1));
 
@@ -52,6 +52,13 @@ module falconsign_fpr_to_int16 #(
                 sat_i32_to_i16 = -16'sd32768;
             else
                 sat_i32_to_i16 = v[15:0];
+        end
+    endfunction
+
+    function [63:0] f64_neg;
+        input [63:0] v;
+        begin
+            f64_neg = (v[62:0] == 63'd0) ? v : {~v[63], v[62:0]};
         end
     endfunction
 
