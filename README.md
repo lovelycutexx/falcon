@@ -1,5 +1,13 @@
 # 可重构 PQC 公共 RTL 模块说明
 
+## 当前进展
+
+本仓库目前的工程重点已经收敛到 **Falcon Sign 签名硬件流程**。当前代码已经接入并验证了签名主路径中的若干关键阶段，包括 HashToPoint、FFT/IFFT、Falcon tree / ffSampling、SamplerZ、B-hat 乘法、FprToInt、NTT、norm check 和 rejection check。
+
+当前顶层入口是 `rtl/falcon/falconsign_top.v`，主要 testbench 是 `tb/tb_falconsign_top_fullkey.v`、`tb/tb_falconsign_top_multicase.v` 和相关单元测试。`sw/` 目录中保留了用于生成 key/tree/golden vector、分析 RTL 输出和验证签名关系的软件工具。
+
+需要说明的是，当前仓库 **只覆盖 Falcon Sign 的实现与验证**；还没有完整 Falcon KeyGen 顶层，也没有完整独立 Falcon Verify 顶层。部分 Verify 相关模块，例如 HashToPoint、NTT 和 norm check，当前主要作为 Sign 数据通路的一部分使用。
+
 本目录包含一版面向 `CTRU / NEV / Falcon / HAWK` 的公共硬件模块实现。当前代码的目标不是一次性实现完整算法，而是先抽取这些算法在硬件实现中的可复用资源，形成“共享主干 + 可切换尾部 + 专用旁路”的可重构 RTL 基础。
 
 ## 设计定位
@@ -471,13 +479,3 @@ vvp tb\tb_falcon_f64_fft_exu.vvp
   IFFT、FprToInt、NTT 和 rejection check 等阶段。
 - 最新保留的 full-key 结果中，官方关系检查可达到 `verify_raw=PASS`，
   norm 总和低于 Falcon bound。
-
-### 不要提交的文件
-
-以下文件是仿真或本地工具生成物，不应该提交到 GitHub：
-
-- `.vcd` 波形文件
-- `.vvp` Icarus Verilog 编译输出
-- `.log` 仿真日志
-- `.exe`、`.out` 本地编译程序
-- `.codegraph/`、`.claude/`、`.serena/` 本地工具状态目录
