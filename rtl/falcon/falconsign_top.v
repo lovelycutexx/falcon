@@ -52,31 +52,31 @@ module falconsign_top #(
     reg cfg_dynamic_tree;
     reg [1:0] mem_addr_hi;
 
-    function [63:0] u16_to_f64;
-        input [15:0] x;
-        integer ii;
-        integer pos;
-        reg [10:0] exp;
-        reg [51:0] frac;
-        reg [63:0] x64;
-        begin
-            if (x == 16'd0) begin
-                u16_to_f64 = 64'd0;
-            end else begin
-                x64 = {48'd0, x};
-                pos = 0;
-                for (ii = 0; ii < 16; ii = ii + 1) begin
-                    if (x[15 - ii]) begin
-                        pos = 15 - ii;
-                        ii = 16;
-                    end
+    reg [63:0] hp_coeff_f64;
+    reg [63:0] hp_coeff_x64;
+    reg [10:0] hp_coeff_exp;
+    reg [51:0] hp_coeff_frac;
+    integer hp_coeff_ii;
+    integer hp_coeff_pos;
+
+    always @(*) begin
+        hp_coeff_f64 = 64'd0;
+        hp_coeff_x64 = {48'd0, htp_coeff};
+        hp_coeff_exp = 11'd0;
+        hp_coeff_frac = 52'd0;
+        hp_coeff_pos = 0;
+        if (htp_coeff != 16'd0) begin
+            for (hp_coeff_ii = 0; hp_coeff_ii < 16; hp_coeff_ii = hp_coeff_ii + 1) begin
+                if (htp_coeff[15 - hp_coeff_ii]) begin
+                    hp_coeff_pos = 15 - hp_coeff_ii;
+                    hp_coeff_ii = 16;
                 end
-                exp = 11'd1023 + pos;
-                frac = (x64 << (63 - pos)) >> 11;
-                u16_to_f64 = {1'b0, exp, frac};
             end
+            hp_coeff_exp = 11'd1023 + hp_coeff_pos;
+            hp_coeff_frac = (hp_coeff_x64 << (63 - hp_coeff_pos)) >> 11;
+            hp_coeff_f64 = {1'b0, hp_coeff_exp, hp_coeff_frac};
         end
-    endfunction
+    end
 
     // ─── Memory ───
     wire mem_a_rd_en,mem_a_wr_en,mem_a_rd0,mem_a_rd1;
@@ -720,7 +720,7 @@ module falconsign_top #(
                 hp_cint_wr_en <= 0;
                 if (htp_coeff_valid) begin
                     hp_wr_en   <= 1'b1;
-                    hp_wr_data <= {128'd0, 64'd0, u16_to_f64(htp_coeff)};
+                    hp_wr_data <= {128'd0, 64'd0, hp_coeff_f64};
                     hp_wr_addr <= hp_wr_addr + 1'b1;
                     if (hp_coeff_cnt == 4'd15) begin
                         hp_cint_wr_en   <= 1'b1;

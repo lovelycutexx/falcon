@@ -50,6 +50,14 @@ module falconsign_ntt_exu #(
     localparam LOGN       = 5'd9;
     localparam N_WORDS    = 32;    // 512 coeffs / 16 per word
 
+`define FALCON_NTT_COEFF(W,L) ((((W) >> ((L) * 16)) & 16'h8000) ? (((((W) >> ((L) * 16)) & 16'hffff) + Q) & 14'h3fff) : (((W) >> ((L) * 16)) & 14'h3fff))
+`define FALCON_NTT_SET_COEFF(W,L,V) (((W) & ~(256'hffff << ((L) * 16))) | (({240'd0, 2'd0, (V)} & 256'hffff) << ((L) * 16)))
+`define FALCON_NTT_R0(P) ((P) - (((((P) * BARRETT_MU) >> 28) & 14'h3fff) * Q))
+`define FALCON_NTT_R1(P) ((`FALCON_NTT_R0(P) >= Q) ? (`FALCON_NTT_R0(P) - Q) : `FALCON_NTT_R0(P))
+`define FALCON_NTT_BARRETT(P) ((`FALCON_NTT_R1(P) >= Q) ? (`FALCON_NTT_R1(P) - Q) : `FALCON_NTT_R1(P))
+`define FALCON_NTT_ADD_MODQ(A,B) (((A) + (B) >= Q) ? ((A) + (B) - Q) : ((A) + (B)))
+`define FALCON_NTT_SUB_MODQ(A,B) (((A) >= (B)) ? ((A) - (B)) : ((A) + Q - (B)))
+
     // ─── Top-level op FSM ───
     localparam [3:0] OP_IDLE      = 0;
     localparam [3:0] OP_PRE       = 1;  // pre-mul on current base
@@ -186,63 +194,6 @@ module falconsign_ntt_exu #(
         .y0_o(bfly_y0), .y1_o(bfly_y1)
     );
 
-    // Barrett reduction
-    function [13:0] barrett;
-        input [27:0] prod;
-        reg [42:0] qh;
-        reg [13:0] q;
-        reg [27:0] r;
-        begin
-            qh = prod * BARRETT_MU;
-            q  = qh[41:28];
-            r  = prod - q * Q;
-            r  = (r >= Q) ? (r - Q) : r;
-            barrett = (r >= Q) ? (r[13:0] - Q) : r[13:0];
-        end
-    endfunction
-
-    // Word helpers (normalize signed 16-bit -> unsigned [0, Q-1])
-    function [13:0] get_coeff;
-        input [255:0] w;
-        input [3:0]   la;
-        reg signed [15:0] raw;
-        begin
-            raw = w[la*16 +: 16];
-            if (raw < 0)
-                get_coeff = raw + Q;  // raw is negative, Q is positive, result in [0, Q-1]
-            else
-                get_coeff = raw[13:0];
-        end
-    endfunction
-
-    function [255:0] set_coeff;
-        input [255:0] w;
-        input [3:0]   la;
-        input [13:0]  v;
-        begin
-            set_coeff = w;
-            set_coeff[la*16 +: 16] = {2'd0, v};
-        end
-    endfunction
-
-    function [13:0] add_modq;
-        input [13:0] a;
-        input [13:0] b;
-        reg [14:0] s;
-        begin
-            s = a + b;
-            add_modq = (s >= Q) ? (s - Q) : s[13:0];
-        end
-    endfunction
-
-    function [13:0] sub_modq;
-        input [13:0] a;
-        input [13:0] b;
-        begin
-            sub_modq = (a >= b) ? (a - b) : (a + Q - b);
-        end
-    endfunction
-
     // Base address for current target
     wire [ADDR_W-1:0] target_base;
     assign target_base = (op_target == TGT_H)  ? cfg_h_work_base :
@@ -296,22 +247,22 @@ module falconsign_ntt_exu #(
                         LS_WAIT_A: ls <= LS_WAIT_A2;
                         LS_WAIT_A2: ls <= LS_CAPT_A;
                         LS_CAPT_A: begin
-                            h_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
-                            h_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
-                            h_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
-                            h_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
-                            h_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
-                            h_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
-                            h_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
-                            h_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
-                            h_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
-                            h_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
-                            h_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
-                            h_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
-                            h_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
-                            h_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
-                            h_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
-                            h_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            h_arr[{word_idx, 4'd0}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd0);
+                            h_arr[{word_idx, 4'd1}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd1);
+                            h_arr[{word_idx, 4'd2}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd2);
+                            h_arr[{word_idx, 4'd3}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd3);
+                            h_arr[{word_idx, 4'd4}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd4);
+                            h_arr[{word_idx, 4'd5}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd5);
+                            h_arr[{word_idx, 4'd6}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd6);
+                            h_arr[{word_idx, 4'd7}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd7);
+                            h_arr[{word_idx, 4'd8}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd8);
+                            h_arr[{word_idx, 4'd9}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd9);
+                            h_arr[{word_idx, 4'd10}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd10);
+                            h_arr[{word_idx, 4'd11}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd11);
+                            h_arr[{word_idx, 4'd12}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd12);
+                            h_arr[{word_idx, 4'd13}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd13);
+                            h_arr[{word_idx, 4'd14}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd14);
+                            h_arr[{word_idx, 4'd15}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd15);
                             ls <= LS_NEXT;
                         end
                         LS_NEXT: begin
@@ -338,22 +289,22 @@ module falconsign_ntt_exu #(
                         LS_WAIT_A: ls <= LS_WAIT_A2;
                         LS_WAIT_A2: ls <= LS_CAPT_A;
                         LS_CAPT_A: begin
-                            s2_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
-                            s2_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
-                            s2_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
-                            s2_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
-                            s2_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
-                            s2_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
-                            s2_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
-                            s2_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
-                            s2_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
-                            s2_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
-                            s2_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
-                            s2_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
-                            s2_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
-                            s2_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
-                            s2_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
-                            s2_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            s2_arr[{word_idx, 4'd0}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd0);
+                            s2_arr[{word_idx, 4'd1}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd1);
+                            s2_arr[{word_idx, 4'd2}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd2);
+                            s2_arr[{word_idx, 4'd3}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd3);
+                            s2_arr[{word_idx, 4'd4}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd4);
+                            s2_arr[{word_idx, 4'd5}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd5);
+                            s2_arr[{word_idx, 4'd6}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd6);
+                            s2_arr[{word_idx, 4'd7}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd7);
+                            s2_arr[{word_idx, 4'd8}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd8);
+                            s2_arr[{word_idx, 4'd9}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd9);
+                            s2_arr[{word_idx, 4'd10}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd10);
+                            s2_arr[{word_idx, 4'd11}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd11);
+                            s2_arr[{word_idx, 4'd12}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd12);
+                            s2_arr[{word_idx, 4'd13}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd13);
+                            s2_arr[{word_idx, 4'd14}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd14);
+                            s2_arr[{word_idx, 4'd15}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd15);
                             ls <= LS_NEXT;
                         end
                         LS_NEXT: begin
@@ -380,22 +331,22 @@ module falconsign_ntt_exu #(
                         LS_WAIT_A: ls <= LS_WAIT_A2;
                         LS_WAIT_A2: ls <= LS_CAPT_A;
                         LS_CAPT_A: begin
-                            c_arr[{word_idx, 4'd0}]  <= get_coeff(mem_rd_data, 4'd0);
-                            c_arr[{word_idx, 4'd1}]  <= get_coeff(mem_rd_data, 4'd1);
-                            c_arr[{word_idx, 4'd2}]  <= get_coeff(mem_rd_data, 4'd2);
-                            c_arr[{word_idx, 4'd3}]  <= get_coeff(mem_rd_data, 4'd3);
-                            c_arr[{word_idx, 4'd4}]  <= get_coeff(mem_rd_data, 4'd4);
-                            c_arr[{word_idx, 4'd5}]  <= get_coeff(mem_rd_data, 4'd5);
-                            c_arr[{word_idx, 4'd6}]  <= get_coeff(mem_rd_data, 4'd6);
-                            c_arr[{word_idx, 4'd7}]  <= get_coeff(mem_rd_data, 4'd7);
-                            c_arr[{word_idx, 4'd8}]  <= get_coeff(mem_rd_data, 4'd8);
-                            c_arr[{word_idx, 4'd9}]  <= get_coeff(mem_rd_data, 4'd9);
-                            c_arr[{word_idx, 4'd10}] <= get_coeff(mem_rd_data, 4'd10);
-                            c_arr[{word_idx, 4'd11}] <= get_coeff(mem_rd_data, 4'd11);
-                            c_arr[{word_idx, 4'd12}] <= get_coeff(mem_rd_data, 4'd12);
-                            c_arr[{word_idx, 4'd13}] <= get_coeff(mem_rd_data, 4'd13);
-                            c_arr[{word_idx, 4'd14}] <= get_coeff(mem_rd_data, 4'd14);
-                            c_arr[{word_idx, 4'd15}] <= get_coeff(mem_rd_data, 4'd15);
+                            c_arr[{word_idx, 4'd0}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd0);
+                            c_arr[{word_idx, 4'd1}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd1);
+                            c_arr[{word_idx, 4'd2}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd2);
+                            c_arr[{word_idx, 4'd3}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd3);
+                            c_arr[{word_idx, 4'd4}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd4);
+                            c_arr[{word_idx, 4'd5}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd5);
+                            c_arr[{word_idx, 4'd6}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd6);
+                            c_arr[{word_idx, 4'd7}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd7);
+                            c_arr[{word_idx, 4'd8}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd8);
+                            c_arr[{word_idx, 4'd9}]  <= `FALCON_NTT_COEFF(mem_rd_data, 4'd9);
+                            c_arr[{word_idx, 4'd10}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd10);
+                            c_arr[{word_idx, 4'd11}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd11);
+                            c_arr[{word_idx, 4'd12}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd12);
+                            c_arr[{word_idx, 4'd13}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd13);
+                            c_arr[{word_idx, 4'd14}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd14);
+                            c_arr[{word_idx, 4'd15}] <= `FALCON_NTT_COEFF(mem_rd_data, 4'd15);
                             ls <= LS_NEXT;
                         end
                         LS_NEXT: begin
@@ -421,14 +372,14 @@ module falconsign_ntt_exu #(
                         sb_h_idx = sb_i - sb_j;
                         sb_neg = 1'b1;
                     end
-                    sb_prod = barrett(s2_arr[sb_j] * h_arr[sb_h_idx]);
+                    sb_prod = `FALCON_NTT_BARRETT(s2_arr[sb_j] * h_arr[sb_h_idx]);
                     if (sb_neg)
-                        sb_acc <= sub_modq(sb_acc, sb_prod);
+                        sb_acc <= `FALCON_NTT_SUB_MODQ(sb_acc, sb_prod);
                     else
-                        sb_acc <= add_modq(sb_acc, sb_prod);
+                        sb_acc <= `FALCON_NTT_ADD_MODQ(sb_acc, sb_prod);
 
                     if (sb_j == 9'd511) begin
-                        s1_arr[sb_i] <= sub_modq(c_arr[sb_i], sb_neg ? sub_modq(sb_acc, sb_prod) : add_modq(sb_acc, sb_prod));
+                        s1_arr[sb_i] <= `FALCON_NTT_SUB_MODQ(c_arr[sb_i], sb_neg ? `FALCON_NTT_SUB_MODQ(sb_acc, sb_prod) : `FALCON_NTT_ADD_MODQ(sb_acc, sb_prod));
                         sb_acc <= 0;
                         sb_j <= 0;
                         if (sb_i == 9'd511) begin
@@ -445,10 +396,10 @@ module falconsign_ntt_exu #(
                 OP_WRITE_SB: begin
                     mem_wr_en <= 1;
                     mem_wr_addr <= cfg_dst_base + {{(ADDR_W-5){1'b0}}, word_idx};
-                    mem_wr_data <= set_coeff(set_coeff(set_coeff(set_coeff(
-                                   set_coeff(set_coeff(set_coeff(set_coeff(
-                                   set_coeff(set_coeff(set_coeff(set_coeff(
-                                   set_coeff(set_coeff(set_coeff(set_coeff(
+                    mem_wr_data <= `FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(
+                                   `FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(
+                                   `FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(
+                                   `FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(
                                    256'd0,
                                    4'd0,  s1_arr[{word_idx, 4'd0}]),
                                    4'd1,  s1_arr[{word_idx, 4'd1}]),
@@ -577,15 +528,15 @@ module falconsign_ntt_exu #(
                         LS_WAIT_A2: begin ls <= LS_CAPT_A; end
                         LS_CAPT_A: begin
                             // mem_rd_data has word (from read in LS_RD_A, captured here)
-                            word_buf_a <= set_coeff(mem_rd_data, 4'd0,
-                                barrett(get_coeff(mem_rd_data, 4'd0) * psi_rom_data));
+                            word_buf_a <= `FALCON_NTT_SET_COEFF(mem_rd_data, 4'd0,
+                                `FALCON_NTT_BARRETT(`FALCON_NTT_COEFF(mem_rd_data, 4'd0) * psi_rom_data));
                             psi_rom_addr <= {1'b0, word_idx[4:0], 4'd1};
                             lane_idx <= 4'd1;
                             ls <= LS_COMP;
                         end
                         LS_COMP: begin
-                            word_buf_a <= set_coeff(word_buf_a, lane_idx,
-                                barrett(get_coeff(word_buf_a, lane_idx) * psi_rom_data));
+                            word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, lane_idx,
+                                `FALCON_NTT_BARRETT(`FALCON_NTT_COEFF(word_buf_a, lane_idx) * psi_rom_data));
                             if (lane_idx < 4'd15) begin
                                 lane_idx <= lane_idx + 4'd1;
                                 psi_rom_addr <= {1'b0, word_idx[4:0], lane_idx + 4'd1};
@@ -632,15 +583,15 @@ module falconsign_ntt_exu #(
                         LS_WAIT_A: begin ls <= LS_WAIT_A2; end
                         LS_WAIT_A2: begin ls <= LS_CAPT_A; end
                         LS_CAPT_A: begin
-                            word_buf_a <= set_coeff(mem_rd_data, 4'd0,
-                                barrett(get_coeff(mem_rd_data, 4'd0) * psi_rom_data));
+                            word_buf_a <= `FALCON_NTT_SET_COEFF(mem_rd_data, 4'd0,
+                                `FALCON_NTT_BARRETT(`FALCON_NTT_COEFF(mem_rd_data, 4'd0) * psi_rom_data));
                             psi_rom_addr <= {1'b1, word_idx[4:0], 4'd1};
                             lane_idx <= 4'd1;
                             ls <= LS_COMP;
                         end
                         LS_COMP: begin
-                            word_buf_a <= set_coeff(word_buf_a, lane_idx,
-                                barrett(get_coeff(word_buf_a, lane_idx) * psi_rom_data));
+                            word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, lane_idx,
+                                `FALCON_NTT_BARRETT(`FALCON_NTT_COEFF(word_buf_a, lane_idx) * psi_rom_data));
                             if (lane_idx < 4'd15) begin
                                 lane_idx <= lane_idx + 4'd1;
                                 psi_rom_addr <= {1'b1, word_idx[4:0], lane_idx + 4'd1};
@@ -722,18 +673,18 @@ module falconsign_ntt_exu #(
                         BS_BFLY: begin
                             if (bfly_go) begin
                                 bfly_in_valid <= 1;
-                                bfly_a <= get_coeff(word_buf_a, ag_lane_a);
-                                bfly_b <= get_coeff(word_buf_b, ag_lane_b);
+                                bfly_a <= `FALCON_NTT_COEFF(word_buf_a, ag_lane_a);
+                                bfly_b <= `FALCON_NTT_COEFF(word_buf_b, ag_lane_b);
                                 bfly_w <= twiddle_rom_data;
                                 bfly_go <= 0;
                             end
                             if (bfly_out_valid) begin
                                 bfly_same_word <= (ag_word_a == ag_word_b);
                                 if (ag_word_a == ag_word_b) begin
-                                    word_buf_a <= set_coeff(set_coeff(word_buf_a, ag_lane_a, bfly_y0), ag_lane_b, bfly_y1);
+                                    word_buf_a <= `FALCON_NTT_SET_COEFF(`FALCON_NTT_SET_COEFF(word_buf_a, ag_lane_a, bfly_y0), ag_lane_b, bfly_y1);
                                 end else begin
-                                    word_buf_a <= set_coeff(word_buf_a, ag_lane_a, bfly_y0);
-                                    word_buf_b <= set_coeff(word_buf_b, ag_lane_b, bfly_y1);
+                                    word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, ag_lane_a, bfly_y0);
+                                    word_buf_b <= `FALCON_NTT_SET_COEFF(word_buf_b, ag_lane_b, bfly_y1);
                                 end
                                 bs <= BS_WRA;
                             end
@@ -812,9 +763,9 @@ module falconsign_ntt_exu #(
                             ls <= LS_COMP;
                         end
                         LS_COMP: begin
-                            word_buf_a <= set_coeff(word_buf_a, lane_idx,
-                                barrett(get_coeff(word_buf_a, lane_idx) *
-                                        get_coeff(word_buf_b, lane_idx)));
+                            word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, lane_idx,
+                                `FALCON_NTT_BARRETT(`FALCON_NTT_COEFF(word_buf_a, lane_idx) *
+                                        `FALCON_NTT_COEFF(word_buf_b, lane_idx)));
                             if (lane_idx < 4'd15) begin
                                 lane_idx <= lane_idx + 4'd1;
                             end else begin
@@ -872,12 +823,12 @@ module falconsign_ntt_exu #(
                         end
                         LS_COMP: begin
                             // s1 = (c - result) mod Q
-                            if (get_coeff(word_buf_a, lane_idx) >= get_coeff(word_buf_b, lane_idx))
-                                word_buf_a <= set_coeff(word_buf_a, lane_idx,
-                                    get_coeff(word_buf_a, lane_idx) - get_coeff(word_buf_b, lane_idx));
+                            if (`FALCON_NTT_COEFF(word_buf_a, lane_idx) >= `FALCON_NTT_COEFF(word_buf_b, lane_idx))
+                                word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, lane_idx,
+                                    `FALCON_NTT_COEFF(word_buf_a, lane_idx) - `FALCON_NTT_COEFF(word_buf_b, lane_idx));
                             else
-                                word_buf_a <= set_coeff(word_buf_a, lane_idx,
-                                    get_coeff(word_buf_a, lane_idx) + Q - get_coeff(word_buf_b, lane_idx));
+                                word_buf_a <= `FALCON_NTT_SET_COEFF(word_buf_a, lane_idx,
+                                    `FALCON_NTT_COEFF(word_buf_a, lane_idx) + Q - `FALCON_NTT_COEFF(word_buf_b, lane_idx));
 
                             if (lane_idx < 4'd15) begin
                                 lane_idx <= lane_idx + 4'd1;
@@ -923,7 +874,7 @@ module falconsign_ntt_exu #(
                         BT_RD_C: begin
                             // mem_rd_data has source word (3 cycles after BT_RD)
                             bt_src_word <= mem_rd_data;
-                            bt_coeff <= get_coeff(mem_rd_data, bt_nat_idx[3:0]);
+                            bt_coeff <= `FALCON_NTT_COEFF(mem_rd_data, bt_nat_idx[3:0]);
                             bt_same_word <= (bt_nat_idx[8:4] == br_word[4:0]);
                             mem_rd_en <= 1;
                             mem_rd_addr <= target_base + br_word;
@@ -934,17 +885,17 @@ module falconsign_ntt_exu #(
                         BT_WR_W2: begin bt <= BT_WR_C; end
                         BT_WR_C: begin
                             // mem_rd_data has dest word
-                            bt_dst_coeff <= get_coeff(mem_rd_data, br_lane);
+                            bt_dst_coeff <= `FALCON_NTT_COEFF(mem_rd_data, br_lane);
                             mem_wr_en <= 1;
                             if (bt_same_word) begin
                                 mem_wr_addr <= target_base + br_word;
-                                mem_wr_data <= set_coeff(
-                                    set_coeff(mem_rd_data, br_lane, bt_coeff),
+                                mem_wr_data <= `FALCON_NTT_SET_COEFF(
+                                    `FALCON_NTT_SET_COEFF(mem_rd_data, br_lane, bt_coeff),
                                     bt_nat_idx[3:0],
-                                    get_coeff(mem_rd_data, br_lane));
+                                    `FALCON_NTT_COEFF(mem_rd_data, br_lane));
                             end else begin
                                 mem_wr_addr <= target_base + br_word;
-                                mem_wr_data <= set_coeff(mem_rd_data, br_lane, bt_coeff);
+                                mem_wr_data <= `FALCON_NTT_SET_COEFF(mem_rd_data, br_lane, bt_coeff);
                             end
                             bt <= BT_WR;
                         end
@@ -952,7 +903,7 @@ module falconsign_ntt_exu #(
                             if (!bt_same_word) begin
                                 mem_wr_en <= 1;
                                 mem_wr_addr <= target_base + {{(ADDR_W-5){1'b0}}, bt_nat_idx[8:4]};
-                                mem_wr_data <= set_coeff(bt_src_word, bt_nat_idx[3:0], bt_dst_coeff);
+                                mem_wr_data <= `FALCON_NTT_SET_COEFF(bt_src_word, bt_nat_idx[3:0], bt_dst_coeff);
                             end
                             bt <= BT_NEXT;
                         end

@@ -41,6 +41,7 @@ module falconsign_shake256(
 
     reg [4:0] widx;
     reg       pad_empty_pending;
+    wire [63:0] partial_last_xval;
 
     reg [63:0] s0,s1,s2,s3,s4,s5,s6,s7,s8,s9;
     reg [63:0] s10,s11,s12,s13,s14,s15,s16,s17,s18,s19;
@@ -52,6 +53,16 @@ module falconsign_shake256(
     wire [63:0] ko0,ko1,ko2,ko3,ko4,ko5,ko6,ko7,ko8,ko9;
     wire [63:0] ko10,ko11,ko12,ko13,ko14,ko15,ko16,ko17,ko18,ko19;
     wire [63:0] ko20,ko21,ko22,ko23,ko24;
+
+    assign partial_last_xval =
+        (din_last_bytes == 3'd1) ? ((din & 64'h0000_0000_0000_00FF) ^ 64'h0000_0000_0000_1F00) :
+        (din_last_bytes == 3'd2) ? ((din & 64'h0000_0000_0000_FFFF) ^ 64'h0000_0000_001F_0000) :
+        (din_last_bytes == 3'd3) ? ((din & 64'h0000_0000_00FF_FFFF) ^ 64'h0000_0000_1F00_0000) :
+        (din_last_bytes == 3'd4) ? ((din & 64'h0000_0000_FFFF_FFFF) ^ 64'h0000_001F_0000_0000) :
+        (din_last_bytes == 3'd5) ? ((din & 64'h0000_00FF_FFFF_FFFF) ^ 64'h0000_1F00_0000_0000) :
+        (din_last_bytes == 3'd6) ? ((din & 64'h0000_FFFF_FFFF_FFFF) ^ 64'h001F_0000_0000_0000) :
+        (din_last_bytes == 3'd7) ? ((din & 64'h00FF_FFFF_FFFF_FFFF) ^ 64'h1F00_0000_0000_0000) :
+                                    din;
 
     falconsign_keccak_core u_keccak(
         .clk(clk),
@@ -80,188 +91,6 @@ module falconsign_shake256(
         endcase
     end
 
-    task clear_state;
-    begin
-        s0  <= 64'd0; s1  <= 64'd0; s2  <= 64'd0; s3  <= 64'd0; s4  <= 64'd0;
-        s5  <= 64'd0; s6  <= 64'd0; s7  <= 64'd0; s8  <= 64'd0; s9  <= 64'd0;
-        s10 <= 64'd0; s11 <= 64'd0; s12 <= 64'd0; s13 <= 64'd0; s14 <= 64'd0;
-        s15 <= 64'd0; s16 <= 64'd0; s17 <= 64'd0; s18 <= 64'd0; s19 <= 64'd0;
-        s20 <= 64'd0; s21 <= 64'd0; s22 <= 64'd0; s23 <= 64'd0; s24 <= 64'd0;
-    end
-    endtask
-
-    task load_keccak_output;
-    begin
-        s0  <= ko0;  s1  <= ko1;  s2  <= ko2;  s3  <= ko3;  s4  <= ko4;
-        s5  <= ko5;  s6  <= ko6;  s7  <= ko7;  s8  <= ko8;  s9  <= ko9;
-        s10 <= ko10; s11 <= ko11; s12 <= ko12; s13 <= ko13; s14 <= ko14;
-        s15 <= ko15; s16 <= ko16; s17 <= ko17; s18 <= ko18; s19 <= ko19;
-        s20 <= ko20; s21 <= ko21; s22 <= ko22; s23 <= ko23; s24 <= ko24;
-    end
-    endtask
-
-    task xor_rate_word;
-        input [4:0] idx;
-        input [63:0] val;
-    begin
-        case (idx)
-            5'd0:  s0  <= s0  ^ val;
-            5'd1:  s1  <= s1  ^ val;
-            5'd2:  s2  <= s2  ^ val;
-            5'd3:  s3  <= s3  ^ val;
-            5'd4:  s4  <= s4  ^ val;
-            5'd5:  s5  <= s5  ^ val;
-            5'd6:  s6  <= s6  ^ val;
-            5'd7:  s7  <= s7  ^ val;
-            5'd8:  s8  <= s8  ^ val;
-            5'd9:  s9  <= s9  ^ val;
-            5'd10: s10 <= s10 ^ val;
-            5'd11: s11 <= s11 ^ val;
-            5'd12: s12 <= s12 ^ val;
-            5'd13: s13 <= s13 ^ val;
-            5'd14: s14 <= s14 ^ val;
-            5'd15: s15 <= s15 ^ val;
-            5'd16: s16 <= s16 ^ val;
-            default: ;
-        endcase
-    end
-    endtask
-
-    function [63:0] last_word_xor;
-        input [63:0] val;
-        input [2:0]  valid_bytes;
-    begin
-        case (valid_bytes)
-            3'd1: last_word_xor = (val & 64'h0000_0000_0000_00FF) ^ 64'h0000_0000_0000_1F00;
-            3'd2: last_word_xor = (val & 64'h0000_0000_0000_FFFF) ^ 64'h0000_0000_001F_0000;
-            3'd3: last_word_xor = (val & 64'h0000_0000_00FF_FFFF) ^ 64'h0000_0000_1F00_0000;
-            3'd4: last_word_xor = (val & 64'h0000_0000_FFFF_FFFF) ^ 64'h0000_001F_0000_0000;
-            3'd5: last_word_xor = (val & 64'h0000_00FF_FFFF_FFFF) ^ 64'h0000_1F00_0000_0000;
-            3'd6: last_word_xor = (val & 64'h0000_FFFF_FFFF_FFFF) ^ 64'h001F_0000_0000_0000;
-            3'd7: last_word_xor = (val & 64'h00FF_FFFF_FFFF_FFFF) ^ 64'h1F00_0000_0000_0000;
-            default: last_word_xor = val;
-        endcase
-    end
-    endfunction
-
-    task xor_partial_last_word;
-        input [4:0]  idx;
-        input [63:0] val;
-        input [2:0]  valid_bytes;
-        reg   [63:0] xval;
-    begin
-        xval = last_word_xor(val, valid_bytes);
-        case (idx)
-            5'd0: begin s0 <= s0 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd1: begin s1 <= s1 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd2: begin s2 <= s2 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd3: begin s3 <= s3 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd4: begin s4 <= s4 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd5: begin s5 <= s5 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd6: begin s6 <= s6 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd7: begin s7 <= s7 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd8: begin s8 <= s8 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd9: begin s9 <= s9 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd10: begin s10 <= s10 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd11: begin s11 <= s11 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd12: begin s12 <= s12 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd13: begin s13 <= s13 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd14: begin s14 <= s14 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd15: begin s15 <= s15 ^ xval; s16 <= s16 ^ PAD_FINAL; end
-            5'd16: s16 <= s16 ^ xval ^ PAD_FINAL;
-            default: ;
-        endcase
-    end
-    endtask
-
-    task apply_padding_after_word;
-        input [4:0] idx;
-    begin
-        case (idx)
-            5'd0: begin
-                s1  <= s1  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd1: begin
-                s2  <= s2  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd2: begin
-                s3  <= s3  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd3: begin
-                s4  <= s4  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd4: begin
-                s5  <= s5  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd5: begin
-                s6  <= s6  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd6: begin
-                s7  <= s7  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd7: begin
-                s8  <= s8  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd8: begin
-                s9  <= s9  ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd9: begin
-                s10 <= s10 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd10: begin
-                s11 <= s11 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd11: begin
-                s12 <= s12 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd12: begin
-                s13 <= s13 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd13: begin
-                s14 <= s14 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd14: begin
-                s15 <= s15 ^ SHAKE_SUFFIX;
-                s16 <= s16 ^ PAD_FINAL;
-            end
-
-            5'd15: begin
-                s16 <= s16 ^ SHAKE_SUFFIX ^ PAD_FINAL;
-            end
-
-            default: ;
-        endcase
-    end
-    endtask
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= ST_IDLE;
@@ -271,7 +100,11 @@ module falconsign_shake256(
             dout_valid        <= 1'b0;
             dout              <= 64'd0;
             pad_empty_pending <= 1'b0;
-            clear_state();
+            s0  <= 64'd0; s1  <= 64'd0; s2  <= 64'd0; s3  <= 64'd0; s4  <= 64'd0;
+            s5  <= 64'd0; s6  <= 64'd0; s7  <= 64'd0; s8  <= 64'd0; s9  <= 64'd0;
+            s10 <= 64'd0; s11 <= 64'd0; s12 <= 64'd0; s13 <= 64'd0; s14 <= 64'd0;
+            s15 <= 64'd0; s16 <= 64'd0; s17 <= 64'd0; s18 <= 64'd0; s19 <= 64'd0;
+            s20 <= 64'd0; s21 <= 64'd0; s22 <= 64'd0; s23 <= 64'd0; s24 <= 64'd0;
         end else begin
             keccak_start <= 1'b0;
             if (!(dout_valid && !dout_ready))
@@ -284,7 +117,11 @@ module falconsign_shake256(
                 pad_empty_pending <= 1'b0;
                 dout_valid        <= 1'b0;
                 dout              <= 64'd0;
-                clear_state();
+                s0  <= 64'd0; s1  <= 64'd0; s2  <= 64'd0; s3  <= 64'd0; s4  <= 64'd0;
+                s5  <= 64'd0; s6  <= 64'd0; s7  <= 64'd0; s8  <= 64'd0; s9  <= 64'd0;
+                s10 <= 64'd0; s11 <= 64'd0; s12 <= 64'd0; s13 <= 64'd0; s14 <= 64'd0;
+                s15 <= 64'd0; s16 <= 64'd0; s17 <= 64'd0; s18 <= 64'd0; s19 <= 64'd0;
+                s20 <= 64'd0; s21 <= 64'd0; s22 <= 64'd0; s23 <= 64'd0; s24 <= 64'd0;
             end else begin
                 case (state)
 
@@ -301,27 +138,81 @@ module falconsign_shake256(
 
                                 if (din_last_bytes != 3'd0) begin
                                     pad_empty_pending <= 1'b0;
-                                    xor_partial_last_word(widx, din, din_last_bytes);
+                                    case (widx)
+                                        5'd0: begin s0 <= s0 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd1: begin s1 <= s1 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd2: begin s2 <= s2 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd3: begin s3 <= s3 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd4: begin s4 <= s4 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd5: begin s5 <= s5 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd6: begin s6 <= s6 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd7: begin s7 <= s7 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd8: begin s8 <= s8 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd9: begin s9 <= s9 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd10: begin s10 <= s10 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd11: begin s11 <= s11 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd12: begin s12 <= s12 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd13: begin s13 <= s13 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd14: begin s14 <= s14 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd15: begin s15 <= s15 ^ partial_last_xval; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd16: s16 <= s16 ^ partial_last_xval ^ PAD_FINAL;
+                                        default: ;
+                                    endcase
                                 end else if (widx == 5'd16) begin
                                     // 当前 word 正好填满一个 rate block。
                                     // 先 permute 当前 block，
                                     // 然后再吸收一个 padding-only block。
                                     pad_empty_pending <= 1'b1;
                                     pad_empty_pending <= 1'b1;
-                                    xor_rate_word(widx, din);
+                                    s16 <= s16 ^ din;
                                 end else begin
                                     pad_empty_pending <= 1'b0;
-                                    xor_rate_word(widx, din);
-                                    apply_padding_after_word(widx);
+                                    case (widx)
+                                        5'd0:  begin s0  <= s0  ^ din; s1  <= s1  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd1:  begin s1  <= s1  ^ din; s2  <= s2  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd2:  begin s2  <= s2  ^ din; s3  <= s3  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd3:  begin s3  <= s3  ^ din; s4  <= s4  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd4:  begin s4  <= s4  ^ din; s5  <= s5  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd5:  begin s5  <= s5  ^ din; s6  <= s6  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd6:  begin s6  <= s6  ^ din; s7  <= s7  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd7:  begin s7  <= s7  ^ din; s8  <= s8  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd8:  begin s8  <= s8  ^ din; s9  <= s9  ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd9:  begin s9  <= s9  ^ din; s10 <= s10 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd10: begin s10 <= s10 ^ din; s11 <= s11 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd11: begin s11 <= s11 ^ din; s12 <= s12 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd12: begin s12 <= s12 ^ din; s13 <= s13 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd13: begin s13 <= s13 ^ din; s14 <= s14 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd14: begin s14 <= s14 ^ din; s15 <= s15 ^ SHAKE_SUFFIX; s16 <= s16 ^ PAD_FINAL; end
+                                        5'd15: begin s15 <= s15 ^ din; s16 <= s16 ^ SHAKE_SUFFIX ^ PAD_FINAL; end
+                                        default: ;
+                                    endcase
                                 end
                             end else if (widx == 5'd16) begin
-                                xor_rate_word(widx, din);
+                                s16 <= s16 ^ din;
                                 widx              <= 5'd0;
                                 after_perm        <= ST_ABSORB;
                                 pad_empty_pending <= 1'b0;
                                 state             <= ST_START_PERM;
                             end else begin
-                                xor_rate_word(widx, din);
+                                case (widx)
+                                    5'd0:  s0  <= s0  ^ din;
+                                    5'd1:  s1  <= s1  ^ din;
+                                    5'd2:  s2  <= s2  ^ din;
+                                    5'd3:  s3  <= s3  ^ din;
+                                    5'd4:  s4  <= s4  ^ din;
+                                    5'd5:  s5  <= s5  ^ din;
+                                    5'd6:  s6  <= s6  ^ din;
+                                    5'd7:  s7  <= s7  ^ din;
+                                    5'd8:  s8  <= s8  ^ din;
+                                    5'd9:  s9  <= s9  ^ din;
+                                    5'd10: s10 <= s10 ^ din;
+                                    5'd11: s11 <= s11 ^ din;
+                                    5'd12: s12 <= s12 ^ din;
+                                    5'd13: s13 <= s13 ^ din;
+                                    5'd14: s14 <= s14 ^ din;
+                                    5'd15: s15 <= s15 ^ din;
+                                    default: ;
+                                endcase
                                 widx <= widx + 5'd1;
                             end
                         end
@@ -387,7 +278,11 @@ module falconsign_shake256(
 
                     ST_WAIT_DONE: begin
                         if (keccak_ready) begin
-                            load_keccak_output();
+                            s0  <= ko0;  s1  <= ko1;  s2  <= ko2;  s3  <= ko3;  s4  <= ko4;
+                            s5  <= ko5;  s6  <= ko6;  s7  <= ko7;  s8  <= ko8;  s9  <= ko9;
+                            s10 <= ko10; s11 <= ko11; s12 <= ko12; s13 <= ko13; s14 <= ko14;
+                            s15 <= ko15; s16 <= ko16; s17 <= ko17; s18 <= ko18; s19 <= ko19;
+                            s20 <= ko20; s21 <= ko21; s22 <= ko22; s23 <= ko23; s24 <= ko24;
 
                             if (pad_empty_pending) begin
                                 pad_empty_pending <= 1'b0;

@@ -143,70 +143,7 @@ wire [ADDR_W-1:0] merge_mirror_base = dst_q + (pair_limit_q << 2) - 1'b1;
 wire [ADDR_W-1:0] merge_mirror_addr0 = merge_mirror_base - (idx_q << 1);
 wire [ADDR_W-1:0] merge_mirror_addr1 = merge_mirror_base - ((idx_q << 1) + 1'b1);
 wire [ADDR_W-1:0] merge_buf_index = pair_limit_q + idx_q;
-
-function [ADDR_W-1:0] pair_count_from_level;
-    input [3:0] level;
-    begin
-        if (level >= 4'd8) begin
-            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
-        end else begin
-            pair_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - level);
-        end
-    end
-endfunction
-
-function [ADDR_W-1:0] word_count_from_level;
-    input [3:0] level;
-    begin
-        if (level >= 4'd8) begin
-            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
-        end else begin
-            word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
-        end
-    end
-endfunction
-
-function [ADDR_W-1:0] raw_word_count_from_level;
-    input [3:0] level;
-    begin
-        if (level >= 4'd8) begin
-            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1};
-        end else begin
-            raw_word_count_from_level = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
-        end
-    end
-endfunction
-
-function [63:0] f64_half;
-    input [63:0] v;
-    begin
-        f64_half = (v[62:52] == 11'd0) ? v : {v[63], v[62:52] - 1'b1, v[51:0]};
-    end
-endfunction
-
-function [63:0] f64_neg;
-    input [63:0] v;
-    begin
-        f64_neg = (v[62:0] == 63'd0) ? v : {~v[63], v[62:0]};
-    end
-endfunction
-
-function [ADDR_W-1:0] twiddle_index;
-    input [ADDR_W-1:0] idx;
-    input [3:0] level;
-    reg [ADDR_W-1:0] base;
-    begin
-        // GM ROM address mapping: base[L] = 256 - 2^(8-L)
-        // Level 0: 0, L1: 128, L2: 192, L3: 224, L4: 240,
-        // L5: 248, L6: 252, L7: 254
-        if (level >= 4'd8) begin
-            twiddle_index = {{(ADDR_W-1){1'b0}}, 1'b1};
-        end else begin
-            base = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level);
-            twiddle_index = 256 - base + idx;
-        end
-    end
-endfunction
+reg [ADDR_W-1:0] twiddle_base_c;
 
 always @(*) begin
     task_ready       = (state == ST_IDLE);
@@ -215,7 +152,13 @@ always @(*) begin
     mem_wr_en        = 1'b0;
     mem_wr_addr      = {ADDR_W{1'b0}};
     mem_wr_data      = 256'd0;
-    twiddle_addr     = twiddle_index(idx_q, level_q);
+    if (level_q >= 4'd8) begin
+        twiddle_base_c = {{(ADDR_W-1){1'b0}}, 1'b1};
+        twiddle_addr   = twiddle_base_c;
+    end else begin
+        twiddle_base_c = {{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - level_q);
+        twiddle_addr   = {{(ADDR_W-9){1'b0}}, 9'd256} - twiddle_base_c + idx_q;
+    end
     fpu_req_valid    = 1'b0;
     fpu_req_op       = FADD;
     fpu_req_a        = 64'd0;
@@ -349,7 +292,9 @@ always @(*) begin
                 if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_re_q};
                 end else begin
-                    mem_wr_data = {128'd0, f64_half(sum_im_q), f64_half(sum_re_q)};
+                    mem_wr_data = {128'd0,
+                                   (sum_im_q[62:52] == 11'd0) ? sum_im_q : {sum_im_q[63], sum_im_q[62:52] - 1'b1, sum_im_q[51:0]},
+                                   (sum_re_q[62:52] == 11'd0) ? sum_re_q : {sum_re_q[63], sum_re_q[62:52] - 1'b1, sum_re_q[51:0]}};
                 end
 `ifndef SYNTHESIS
                 if (debug_trace_exu && (op_q == OP_SPLIT) && (level_q <= 4'd1) && (idx_q < 2)) begin
@@ -374,7 +319,9 @@ always @(*) begin
                 if (level_q >= 4'd8) begin
                     mem_wr_data = {192'd0, a_im_q};
                 end else begin
-                    mem_wr_data = {128'd0, f64_half(rot_im_q), f64_half(rot_re_q)};
+                    mem_wr_data = {128'd0,
+                                   (rot_im_q[62:52] == 11'd0) ? rot_im_q : {rot_im_q[63], rot_im_q[62:52] - 1'b1, rot_im_q[51:0]},
+                                   (rot_re_q[62:52] == 11'd0) ? rot_re_q : {rot_re_q[63], rot_re_q[62:52] - 1'b1, rot_re_q[51:0]}};
                 end
 `ifndef SYNTHESIS
                 if (debug_trace_exu && (op_q == OP_SPLIT) && (level_q <= 4'd1) && (idx_q < 2)) begin
@@ -395,13 +342,13 @@ always @(*) begin
         ST_PAIR_MIR0: begin
             mem_wr_en   = 1'b1;
             mem_wr_addr = merge_mirror_addr0;
-            mem_wr_data = {128'd0, f64_neg(out0_im_q), out0_re_q};
+            mem_wr_data = {128'd0, (out0_im_q[62:0] == 63'd0) ? out0_im_q : {~out0_im_q[63], out0_im_q[62:0]}, out0_re_q};
         end
 
         ST_PAIR_MIR1: begin
             mem_wr_en   = 1'b1;
             mem_wr_addr = merge_mirror_addr1;
-            mem_wr_data = {128'd0, f64_neg(out1_im_q), out1_re_q};
+            mem_wr_data = {128'd0, (out1_im_q[62:0] == 63'd0) ? out1_im_q : {~out1_im_q[63], out1_im_q[62:0]}, out1_re_q};
         end
 
         ST_ADJ_WR: begin
@@ -418,7 +365,7 @@ always @(*) begin
         ST_ADJ_MIRROR_WR: begin
             mem_wr_en = 1'b1;
             mem_wr_addr = adj_mirror_addr;
-            mem_wr_data = {128'd0, f64_neg(out0_im_q), out0_re_q};
+            mem_wr_data = {128'd0, (out0_im_q[62:0] == 63'd0) ? out0_im_q : {~out0_im_q[63], out0_im_q[62:0]}, out0_re_q};
         end
 
         ST_SAMPLE_REQ: begin
@@ -506,7 +453,8 @@ always @(posedge clk or negedge rst_n) begin
                     src0_q       <= task_word[49:36];
                     src1_q       <= task_word[35:22];
                     dst_q        <= task_word[21:8];
-                    pair_limit_q <= pair_count_from_level(task_word[63:60]);
+                    pair_limit_q <= (task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                               : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]));
                     adj_root_full_q <= 1'b0;
                     idx_q        <= {ADDR_W{1'b0}};
                     lane_q       <= 3'd0;
@@ -517,7 +465,8 @@ always @(posedge clk or negedge rst_n) begin
                             if (task_word[63:60] >= 4'd8) begin
                                 state <= ST_PAIR_A_REQ;
                             end else begin
-                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
+                                split_words_q <= ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                          : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]))) << 1;
                                 state         <= ST_SPLIT_PREF_REQ;
                             end
                         end
@@ -525,21 +474,27 @@ always @(posedge clk or negedge rst_n) begin
                             if (task_word[63:60] >= 4'd8) begin
                                 state <= ST_PAIR_A_REQ;
                             end else begin
-                                split_words_q <= pair_count_from_level(task_word[63:60]) << 1;
+                                split_words_q <= ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                          : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]))) << 1;
                                 state         <= ST_SPLIT_PREF_REQ;
                             end
                         end
                         OP_COPY: begin
-                            pair_limit_q <= pair_count_from_level(task_word[63:60]);
+                            pair_limit_q <= (task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60]));
                             idx_q        <= {ADDR_W{1'b0}};
                             state        <= ST_COPY_REQ;
                         end
                         OP_ADJUST: begin
                             adj_root_full_q <= task_word[0];
-                            pair_limit_q <= task_word[0] ? word_count_from_level(task_word[63:60])
-                                                          : pair_count_from_level(task_word[63:60]);
-                            l_half_q     <= task_word[0] ? word_count_from_level(task_word[63:60])
-                                                          : pair_count_from_level(task_word[63:60]);
+                            pair_limit_q <= task_word[0] ? ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - task_word[63:60])))
+                                                          : ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60])));
+                            l_half_q     <= task_word[0] ? ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd8 - task_word[63:60])))
+                                                          : ((task_word[63:60] >= 4'd8) ? {{(ADDR_W-1){1'b0}}, 1'b1}
+                                                                                       : ({{(ADDR_W-1){1'b0}}, 1'b1} << (4'd7 - task_word[63:60])));
                             l_base_q     <= task_word[35:22];
                             adj_t0_base_q <= {task_word[7:4], task_word[59:50]};
                             state        <= ST_ADJ_L_REQ;
@@ -572,7 +527,8 @@ always @(posedge clk or negedge rst_n) begin
 
             ST_ADJ_L_CAP: begin
                 l_re_q <= mem_rd_data[63:0];
-                l_im_q <= adj_l_mirror ? f64_neg(mem_rd_data[127:64]) : mem_rd_data[127:64];
+                l_im_q <= adj_l_mirror ? ((mem_rd_data[126:64] == 63'd0) ? mem_rd_data[127:64] : {~mem_rd_data[127], mem_rd_data[126:64]})
+                                        : mem_rd_data[127:64];
                 state  <= ST_ADJ_T1_REQ;
             end
 

@@ -71,6 +71,17 @@ module falcon_fp_fpu (
     wire        mul_inexact;
 
     wire [63:0] neg_tmp;
+    integer    fcvt_exp_unb;
+    integer    fcvt_rsh;
+    reg [63:0] fcvt_int_part;
+    reg        fcvt_guard;
+    reg        fcvt_rnd_stk;
+    reg        fcvt_neg;
+    reg [63:0] fcvt_abs_val;
+    reg [10:0] fcvt_exp;
+    reg [51:0] fcvt_frac;
+    integer    fcvt_ii;
+    integer    fcvt_pos;
 
     assign req_ready  = (state == ST_IDLE);
     assign rsp_valid  = (state == ST_HOLD);
@@ -239,27 +250,22 @@ module falcon_fp_fpu (
                                 result_q <= a_q[63] ? 64'h8000000000000000
                                                      : 64'h7FFFFFFFFFFFFFFF;
                             end else begin
-                                integer    exp_unb;
-                                reg [63:0] int_part;
-                                reg        guard;
-                                reg        rnd_stk;
-                                exp_unb = a_q[62:52] - 11'd1023;
-                                if (exp_unb <= 52) begin
-                                    integer rsh;
-                                    rsh = 52 - exp_unb;
-                                    int_part = (64'd1 << exp_unb) + (a_q[51:0] >> rsh);
-                                    guard    = (rsh > 0) ? ((a_q[51:0] >> (rsh - 1)) & 1'b1) : 1'b0;
-                                    rnd_stk  = (rsh > 0) ? |(a_q[51:0] & ((64'd1 << rsh) - 1)) : 1'b0;
+                                fcvt_exp_unb = a_q[62:52] - 11'd1023;
+                                if (fcvt_exp_unb <= 52) begin
+                                    fcvt_rsh = 52 - fcvt_exp_unb;
+                                    fcvt_int_part = (64'd1 << fcvt_exp_unb) + (a_q[51:0] >> fcvt_rsh);
+                                    fcvt_guard    = (fcvt_rsh > 0) ? ((a_q[51:0] >> (fcvt_rsh - 1)) & 1'b1) : 1'b0;
+                                    fcvt_rnd_stk  = (fcvt_rsh > 0) ? |(a_q[51:0] & ((64'd1 << fcvt_rsh) - 1)) : 1'b0;
                                 end else begin
-                                    int_part = (a_q[51:0] << (exp_unb - 52));
-                                    int_part = int_part | (64'd1 << exp_unb);
-                                    guard    = 1'b0;
-                                    rnd_stk  = 1'b0;
+                                    fcvt_int_part = (a_q[51:0] << (fcvt_exp_unb - 52));
+                                    fcvt_int_part = fcvt_int_part | (64'd1 << fcvt_exp_unb);
+                                    fcvt_guard    = 1'b0;
+                                    fcvt_rnd_stk  = 1'b0;
                                 end
                                 // round-to-nearest-even
-                                if (guard && (int_part[0] || rnd_stk))
-                                    int_part = int_part + 1'b1;
-                                result_q <= a_q[63] ? (~int_part + 1'b1) : int_part;
+                                if (fcvt_guard && (fcvt_int_part[0] || fcvt_rnd_stk))
+                                    fcvt_int_part = fcvt_int_part + 1'b1;
+                                result_q <= a_q[63] ? (~fcvt_int_part + 1'b1) : fcvt_int_part;
                             end
                             flags_q <= 5'd0;
                             state   <= ST_HOLD;
@@ -270,27 +276,21 @@ module falcon_fp_fpu (
                             if (a_q == 64'd0) begin
                                 result_q <= 64'd0;
                             end else begin
-                                reg        neg;
-                                reg [63:0] abs_val;
-                                reg [10:0] exp;
-                                reg [51:0] frac;
-                                integer    ii;
-                                integer    pos;
-                                neg = a_q[63];
-                                abs_val = neg ? (~a_q + 1'b1) : a_q;
+                                fcvt_neg = a_q[63];
+                                fcvt_abs_val = fcvt_neg ? (~a_q + 1'b1) : a_q;
                                 // find position of leading 1
-                                pos = 63;
-                                for (ii = 0; ii < 64; ii = ii + 1) begin
-                                    if (abs_val[63 - ii]) begin
-                                        pos = 63 - ii;
-                                        ii = 63;
+                                fcvt_pos = 63;
+                                for (fcvt_ii = 0; fcvt_ii < 64; fcvt_ii = fcvt_ii + 1) begin
+                                    if (fcvt_abs_val[63 - fcvt_ii]) begin
+                                        fcvt_pos = 63 - fcvt_ii;
+                                        fcvt_ii = 64;
                                     end
                                 end
-                                exp = 11'd1023 + pos;
+                                fcvt_exp = 11'd1023 + fcvt_pos;
                                 // extract the 52 bits below the leading 1
                                 // Equivalent to: (abs_val << (63 - pos)) >> 11
-                                frac = (abs_val << (63 - pos)) >> 11;
-                                result_q <= {neg, exp, frac};
+                                fcvt_frac = (fcvt_abs_val << (63 - fcvt_pos)) >> 11;
+                                result_q <= {fcvt_neg, fcvt_exp, fcvt_frac};
                             end
                             flags_q <= 5'd0;
                             state   <= ST_HOLD;

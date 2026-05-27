@@ -74,7 +74,7 @@ module falconsign_ffsampling_task_update #
     localparam [1:0] SUB_LDL      = 2'd2;
     localparam [1:0] SUB_PRESERVE = 2'd3;
 
-    // RUN_* wraps the valid/ready task interface:
+    // RUN_* wraps the valid/ready task handshake:
     // EMIT holds one task stable until accepted; WAIT keeps the scheduler state
     // frozen until EXU reports task_done/task_fail.
     localparam [2:0] RUN_IDLE  = 3'd0;
@@ -139,56 +139,63 @@ module falconsign_ffsampling_task_update #
     reg [ADDR_W-1:0] component_stride, component_words;
     reg [ADDR_W-1:0] seg_offset, node_words, pair_cnt_for_adj, tree_ofs;
     reg [ADDR_W-1:0] parent_stride;
+    reg [ADDR_W-1:0] preserve_offset;
+    reg [ADDR_W-1:0] seg_offset_acc;
     reg [INDEX_W-1:0] data_index;
     reg [3:0]         tree_level_eff;
     reg [INDEX_W-1:0] tree_index_eff;
+    reg [3:0]         seg_bitpos;
+    reg [3:0]         task_opcode_c;
+    reg [LEVEL_W-1:0] task_level_c;
+    reg [INDEX_W-1:0] task_index_c;
+    reg [ADDR_W-1:0]  task_src0_c;
+    reg [ADDR_W-1:0]  task_src1_c;
+    reg [ADDR_W-1:0]  task_dst_c;
+    reg [7:0]         task_aux_c;
+    reg [13:0]        task_t0_dst_ext;
 
     // Number of complex words in one child component below level lv.
     // Ordinary internal ADJUST/COPY/MERGE operations use this half-size count.
     // The root transition from z1 to t0 is different and is marked explicitly
     // by the root_full bit in pack_adjust_task().
-    function [ADDR_W-1:0] stride_at_level;
-        input [3:0] lv;
-        begin
-            case (cfg_depth - lv)
-                4'd9:  stride_at_level = {{(ADDR_W-8){1'b0}}, 8'd128};
-                4'd8:  stride_at_level = {{(ADDR_W-7){1'b0}}, 7'd64};
-                4'd7:  stride_at_level = {{(ADDR_W-6){1'b0}}, 6'd32};
-                4'd6:  stride_at_level = {{(ADDR_W-5){1'b0}}, 5'd16};
-                4'd5:  stride_at_level = {{(ADDR_W-4){1'b0}}, 4'd8};
-                4'd4:  stride_at_level = {{(ADDR_W-3){1'b0}}, 3'd4};
-                4'd3:  stride_at_level = {{(ADDR_W-2){1'b0}}, 2'd2};
-                4'd2:  stride_at_level = {{(ADDR_W-1){1'b0}}, 1'd1};
-                default: stride_at_level = {{(ADDR_W-1){1'b0}}, 1'd1};
-            endcase
-        end
-    endfunction
-
-    // Preserve storage is a compact side buffer. SPLIT writes the right half
-    // into z_area, but the right child will overwrite/use scratch while it is
-    // sampled, so the original split-right t1 is copied here for ADJUST.
-    function [ADDR_W-1:0] preserve_offset_at_level;
-        input [3:0] lv;
-        begin
-            case (lv)
-                4'd0: preserve_offset_at_level = {ADDR_W{1'b0}};
-                4'd1: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd128};
-                4'd2: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd192};
-                4'd3: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd224};
-                4'd4: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd240};
-                4'd5: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd248};
-                4'd6: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd252};
-                4'd7: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd254};
-                default: preserve_offset_at_level = {{(ADDR_W-8){1'b0}}, 8'd255};
-            endcase
-        end
-    endfunction
-
     always @(*) begin
-        component_stride = stride_at_level(level_q);
+        case (cfg_depth - level_q)
+            4'd9:  component_stride = {{(ADDR_W-8){1'b0}}, 8'd128};
+            4'd8:  component_stride = {{(ADDR_W-7){1'b0}}, 7'd64};
+            4'd7:  component_stride = {{(ADDR_W-6){1'b0}}, 6'd32};
+            4'd6:  component_stride = {{(ADDR_W-5){1'b0}}, 5'd16};
+            4'd5:  component_stride = {{(ADDR_W-4){1'b0}}, 4'd8};
+            4'd4:  component_stride = {{(ADDR_W-3){1'b0}}, 3'd4};
+            4'd3:  component_stride = {{(ADDR_W-2){1'b0}}, 2'd2};
+            4'd2:  component_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
+            default: component_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
+        endcase
     end
     always @(*) begin
-        parent_stride = stride_at_level(level_q - 1'b1);
+        case (cfg_depth - (level_q - 1'b1))
+            4'd9:  parent_stride = {{(ADDR_W-8){1'b0}}, 8'd128};
+            4'd8:  parent_stride = {{(ADDR_W-7){1'b0}}, 7'd64};
+            4'd7:  parent_stride = {{(ADDR_W-6){1'b0}}, 6'd32};
+            4'd6:  parent_stride = {{(ADDR_W-5){1'b0}}, 5'd16};
+            4'd5:  parent_stride = {{(ADDR_W-4){1'b0}}, 4'd8};
+            4'd4:  parent_stride = {{(ADDR_W-3){1'b0}}, 3'd4};
+            4'd3:  parent_stride = {{(ADDR_W-2){1'b0}}, 2'd2};
+            4'd2:  parent_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
+            default: parent_stride = {{(ADDR_W-1){1'b0}}, 1'd1};
+        endcase
+    end
+    always @(*) begin
+        case (level_q)
+            4'd0: preserve_offset = {ADDR_W{1'b0}};
+            4'd1: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd128};
+            4'd2: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd192};
+            4'd3: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd224};
+            4'd4: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd240};
+            4'd5: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd248};
+            4'd6: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd252};
+            4'd7: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd254};
+            default: preserve_offset = {{(ADDR_W-8){1'b0}}, 8'd255};
+        endcase
     end
     always @(*) begin
         component_words = {{(ADDR_W-1){1'b0}}, 1'b1} << cfg_depth;
@@ -204,35 +211,6 @@ module falconsign_ffsampling_task_update #
         end
     end
 
-    // Compute seg_offset by walking the path from root. For each right turn,
-    // add the child stride at that ancestor level. This matches the SPLIT
-    // output layout: left child reuses parent offset, right child is placed at
-    // parent offset + child_stride.
-    function [ADDR_W-1:0] compute_seg_offset;
-        input [INDEX_W-1:0] idx;
-        input [3:0]          lv;
-        reg [ADDR_W-1:0] off;
-        reg [3:0] bitpos;
-        begin
-            off = {ADDR_W{1'b0}};
-            for (bitpos = 0; bitpos < lv; bitpos = bitpos + 1) begin
-                if (idx[lv - 1 - bitpos]) begin
-                    case (bitpos[3:0])
-                        4'd0: off = off + {{(ADDR_W-8){1'b0}}, 8'd128};
-                        4'd1: off = off + {{(ADDR_W-7){1'b0}}, 7'd64};
-                        4'd2: off = off + {{(ADDR_W-6){1'b0}}, 6'd32};
-                        4'd3: off = off + {{(ADDR_W-5){1'b0}}, 5'd16};
-                        4'd4: off = off + {{(ADDR_W-4){1'b0}}, 4'd8};
-                        4'd5: off = off + {{(ADDR_W-3){1'b0}}, 3'd4};
-                        4'd6: off = off + {{(ADDR_W-2){1'b0}}, 2'd2};
-                        default: off = off + {{(ADDR_W-1){1'b0}}, 1'd1};
-                    endcase
-                end
-            end
-            compute_seg_offset = off;
-        end
-    endfunction
-
     always @(*) begin
         if (at_root) begin
             seg_offset = {ADDR_W{1'b0}};
@@ -243,7 +221,22 @@ module falconsign_ffsampling_task_update #
         end else begin
             // Internal node offset = sum of child_stride for every right-turn
             // ancestor on the path from the root.
-            seg_offset = compute_seg_offset(index_q, level_q);
+            seg_offset_acc = {ADDR_W{1'b0}};
+            for (seg_bitpos = 0; seg_bitpos < 4'd10; seg_bitpos = seg_bitpos + 1) begin
+                if ((seg_bitpos < level_q) && index_q[level_q - 1'b1 - seg_bitpos]) begin
+                    case (seg_bitpos)
+                        4'd0: seg_offset_acc = seg_offset_acc + {{(ADDR_W-8){1'b0}}, 8'd128};
+                        4'd1: seg_offset_acc = seg_offset_acc + {{(ADDR_W-7){1'b0}}, 7'd64};
+                        4'd2: seg_offset_acc = seg_offset_acc + {{(ADDR_W-6){1'b0}}, 6'd32};
+                        4'd3: seg_offset_acc = seg_offset_acc + {{(ADDR_W-5){1'b0}}, 5'd16};
+                        4'd4: seg_offset_acc = seg_offset_acc + {{(ADDR_W-4){1'b0}}, 4'd8};
+                        4'd5: seg_offset_acc = seg_offset_acc + {{(ADDR_W-3){1'b0}}, 3'd4};
+                        4'd6: seg_offset_acc = seg_offset_acc + {{(ADDR_W-2){1'b0}}, 2'd2};
+                        default: seg_offset_acc = seg_offset_acc + {{(ADDR_W-1){1'b0}}, 1'd1};
+                    endcase
+                end
+            end
+            seg_offset = seg_offset_acc;
         end
     end
     always @(*) begin
@@ -264,7 +257,7 @@ module falconsign_ffsampling_task_update #
     end
 
     always @(*) begin
-        pair_cnt_for_adj = stride_at_level(level_q);
+        pair_cnt_for_adj = component_stride;
     end
 
     // Target t values live under cfg_t_base; sampled z values live under cfg_z_base.
@@ -298,7 +291,7 @@ module falconsign_ffsampling_task_update #
     wire [ADDR_W-1:0] tmp_leaf_addr = tmp_leaf_base + {{(ADDR_W-INDEX_W){1'b0}}, local_leaf_index};
     wire [ADDR_W-1:0] tmp_scalar_pair_addr = tmp_leaf_base + {{(ADDR_W-INDEX_W){1'b0}}, (local_index << 1)};
     wire [ADDR_W-1:0] preserve_base = cfg_tmp_base + {{(ADDR_W-9){1'b0}}, 9'd256};
-    wire [ADDR_W-1:0] preserve_addr = preserve_base + preserve_offset_at_level(level_q);
+    wire [ADDR_W-1:0] preserve_addr = preserve_base + preserve_offset;
     // After the complete z1 tree has been merged at the root, emit one
     // full-size root ADJUST to update t0 before starting the z0 pass.
     wire              outer_root_adjust = at_root && bank_q && root_z1_merged_q;
@@ -393,6 +386,14 @@ module falconsign_ffsampling_task_update #
     always @(*) begin
         task_valid = 1'b0;
         task_word  = 68'd0;
+        task_opcode_c = OP_SAMPLE_PAIR;
+        task_level_c  = level_q;
+        task_index_c  = index_q;
+        task_src0_c   = sample_src0;
+        task_src1_c   = sample_src1;
+        task_dst_c    = sample_dst;
+        task_aux_c    = 8'hFF;
+        task_t0_dst_ext = 14'd0;
 
         if (run_state == RUN_EMIT) begin
             task_valid = 1'b1;
@@ -401,23 +402,46 @@ module falconsign_ffsampling_task_update #
                     // Descending into a right branch: split/read this node if
                     // internal, otherwise sample the leaf.
                     if (at_leaf) begin
-                        task_word = pack_task(OP_SAMPLE_PAIR, level_q, index_q, sample_src0, sample_src1, sample_dst, 8'h00);
+                        task_opcode_c = OP_SAMPLE_PAIR;
+                        task_aux_c    = 8'h00;
                     end else if (cfg_dynamic_tree && (sub_q == SUB_LDL)) begin
-                        task_word = pack_task(OP_DYNAMIC_LDL, level_q, index_q, src0_addr, src1_addr, dst_addr, 8'h00);
+                        task_opcode_c = OP_DYNAMIC_LDL;
+                        task_src0_c   = src0_addr;
+                        task_src1_c   = src1_addr;
+                        task_dst_c    = dst_addr;
+                        task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_READ) begin
-                        task_word = pack_task(OP_READ_L10, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                        task_opcode_c = OP_READ_L10;
+                        task_src0_c   = split_src0;
+                        task_src1_c   = split_src1;
+                        task_dst_c    = split_dst;
+                        task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_PRESERVE) begin
-                        task_word = pack_task(OP_COPY, level_q, index_q, preserve_src, tree_addr, preserve_addr, 8'h00);
+                        task_opcode_c = OP_COPY;
+                        task_src0_c   = preserve_src;
+                        task_src1_c   = tree_addr;
+                        task_dst_c    = preserve_addr;
+                        task_aux_c    = 8'h00;
                     end else begin
-                        task_word = pack_task(OP_SPLIT_T1, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                        task_opcode_c = OP_SPLIT_T1;
+                        task_src0_c   = split_src0;
+                        task_src1_c   = split_src1;
+                        task_dst_c    = split_dst;
+                        task_aux_c    = 8'h00;
                     end
                 end
 
                 ST_RIGHT_UP: begin
                     // Right subtree is complete, so compute the Falcon adjust
                     // before scheduling the left subtree.
-                    task_word = pack_adjust_task(level_q, adj_dst, adj_src0, tree_addr, adj_src1,
-                                                 outer_root_adjust);
+                    task_t0_dst_ext = {{(14-ADDR_W){1'b0}}, adj_dst};
+                    task_opcode_c = OP_ADJUST_T0;
+                    task_level_c  = level_q;
+                    task_index_c  = adj_dst[9:0];
+                    task_src0_c   = adj_src0;
+                    task_src1_c   = tree_addr;
+                    task_dst_c    = adj_src1;
+                    task_aux_c    = {task_t0_dst_ext[13:10], 3'd0, outer_root_adjust};
 `ifndef SYNTHESIS
                     if (debug_trace_tasks && outer_root_adjust) begin
                         $display("  FS_OUTER_ROOT_ADJ bank=%0d root_z1=%0d: adj_dst=%0d adj_src0=%0d adj_src1=%0d",
@@ -430,83 +454,66 @@ module falconsign_ffsampling_task_update #
                 end
 
                 ST_LEFT_DOWN: begin
-                    // Same preparation sequence as RIGHT_DOWN, but the next
+                    // Same preparation steps as RIGHT_DOWN, but the next
                     // descent target is the left child in the FSM update.
                     if (at_leaf) begin
-                        task_word = pack_task(OP_SAMPLE_PAIR, level_q, index_q, sample_src0, sample_src1, sample_dst, 8'h00);
+                        task_opcode_c = OP_SAMPLE_PAIR;
+                        task_aux_c    = 8'h00;
                     end else if (cfg_dynamic_tree && (sub_q == SUB_LDL)) begin
-                        task_word = pack_task(OP_DYNAMIC_LDL, level_q, index_q, src0_addr, src1_addr, dst_addr, 8'h00);
+                        task_opcode_c = OP_DYNAMIC_LDL;
+                        task_src0_c   = src0_addr;
+                        task_src1_c   = src1_addr;
+                        task_dst_c    = dst_addr;
+                        task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_READ) begin
-                        task_word = pack_task(OP_READ_L10, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                        task_opcode_c = OP_READ_L10;
+                        task_src0_c   = split_src0;
+                        task_src1_c   = split_src1;
+                        task_dst_c    = split_dst;
+                        task_aux_c    = 8'h00;
                     end else if (sub_q == SUB_PRESERVE) begin
-                        task_word = pack_task(OP_COPY, level_q, index_q, preserve_src, tree_addr, preserve_addr, 8'h00);
+                        task_opcode_c = OP_COPY;
+                        task_src0_c   = preserve_src;
+                        task_src1_c   = tree_addr;
+                        task_dst_c    = preserve_addr;
+                        task_aux_c    = 8'h00;
                     end else begin
-                        task_word = pack_task(OP_SPLIT_T1, level_q, index_q, split_src0, split_src1, split_dst, 8'h00);
+                        task_opcode_c = OP_SPLIT_T1;
+                        task_src0_c   = split_src0;
+                        task_src1_c   = split_src1;
+                        task_dst_c    = split_dst;
+                        task_aux_c    = 8'h00;
                     end
                 end
 
                 ST_LEFT_UP: begin
                     // Both children under this node are ready; merge z0/z1
                     // toward the parent.
-                    task_word = pack_task(OP_MERGE_Z, level_q, index_q, merge_src0, merge_src1, merge_dst, 8'h00);
+                    task_opcode_c = OP_MERGE_Z;
+                    task_src0_c   = merge_src0;
+                    task_src1_c   = merge_src1;
+                    task_dst_c    = merge_dst;
+                    task_aux_c    = 8'h00;
                 end
 
                 default: begin
-                    task_word = pack_task(OP_SAMPLE_PAIR, level_q, index_q, sample_src0, sample_src1, sample_dst, 8'hFF);
+                    task_opcode_c = OP_SAMPLE_PAIR;
+                    task_aux_c    = 8'hFF;
                 end
             endcase
         end
+
+        // Generic task word format:
+        //   [67:64] opcode, [63:60] level, [59:50] index,
+        //   [49:36] src0, [35:22] src1, [21:8] dst, [7:0] aux.
+        task_word[67:64] = task_opcode_c;
+        task_word[63:60] = task_level_c[3:0];
+        task_word[59:50] = task_index_c[9:0];
+        task_word[49:36] = {{(14-ADDR_W){1'b0}}, task_src0_c};
+        task_word[35:22] = {{(14-ADDR_W){1'b0}}, task_src1_c};
+        task_word[21:8]  = {{(14-ADDR_W){1'b0}}, task_dst_c};
+        task_word[7:0]   = task_aux_c;
     end
-
-    // Generic task word format:
-    //   [67:64] opcode
-    //   [63:60] level
-    //   [59:50] index
-    //   [49:36] src0
-    //   [35:22] src1
-    //   [21:8]  dst
-    //   [7:0]   aux
-    function [67:0] pack_task;
-        input [3:0]          opcode;
-        input [LEVEL_W-1:0]  level;
-        input [INDEX_W-1:0]  index;
-        input [ADDR_W-1:0]   src0;
-        input [ADDR_W-1:0]   src1;
-        input [ADDR_W-1:0]   dst;
-        input [7:0]          aux;
-        begin
-            pack_task = 68'd0;
-            pack_task[67:64] = opcode;
-            pack_task[63:60] = level[3:0];
-            pack_task[59:50] = index[9:0];
-            pack_task[49:36] = {{(14-ADDR_W){1'b0}}, src0};
-            pack_task[35:22] = {{(14-ADDR_W){1'b0}}, src1};
-            pack_task[21:8]  = {{(14-ADDR_W){1'b0}}, dst};
-            pack_task[7:0]   = aux;
-        end
-    endfunction
-
-    // ADJUST overloads the generic fields so EXU can reconstruct all three
-    // addresses plus the full t0 destination:
-    //   index    = t0_dst[9:0]
-    //   aux[7:4] = t0_dst[13:10]
-    //   aux[0]   = root_full, selecting full root length instead of the
-    //              normal child half-size length.
-    function [67:0] pack_adjust_task;
-        input [LEVEL_W-1:0]  level;
-        input [ADDR_W-1:0]   t0_dst;
-        input [ADDR_W-1:0]   t1_src;
-        input [ADDR_W-1:0]   l10_src;
-        input [ADDR_W-1:0]   z1_src;
-        input                 root_full;
-        reg   [13:0]         t0_dst_ext;
-        begin
-            t0_dst_ext = {{(14-ADDR_W){1'b0}}, t0_dst};
-            pack_adjust_task = pack_task(OP_ADJUST_T0, level, t0_dst[9:0],
-                                         t1_src, l10_src, z1_src,
-                                         {t0_dst_ext[13:10], 3'd0, root_full});
-        end
-    endfunction
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -548,7 +555,7 @@ module falconsign_ffsampling_task_update #
                         end else begin
                             // Start every signature at the root of the t1/z1
                             // pass. Dynamic-tree mode inserts LDL before the
-                            // normal READ/SPLIT sequence at each internal node.
+                                // normal READ/SPLIT steps at each internal node.
                             level_q   <= {LEVEL_W{1'b0}};
                             index_q   <= {INDEX_W{1'b0}};
                             state_q   <= ST_RIGHT_DOWN;

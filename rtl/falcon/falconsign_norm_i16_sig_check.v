@@ -39,59 +39,37 @@ module falconsign_norm_i16_sig_check #(
     reg check_s1_q;
     reg reject_q;
 
-    wire [63:0] word_sum_s2 = packed_signed_square_sum(mem_rd_data);
-    wire [63:0] word_sum_s1 = packed_centered_modq_square_sum(mem_rd_data);
+    reg [63:0] word_sum_s2;
+    reg [63:0] word_sum_s1;
+    reg signed [15:0] sum_lane;
+    reg [15:0] sum_abs;
+    reg [15:0] sum_center_u;
+    integer sum_i;
+
     wire [63:0] word_sum    = check_s1_q ? word_sum_s1 : word_sum_s2;
     wire [63:0] next_norm_sq = norm_sq + word_sum;
 
     assign start_ready = (state == ST_IDLE);
 
-    function [63:0] lane_square;
-        input signed [15:0] v;
-        reg [15:0] abs_v;
-        begin
-            abs_v = v[15] ? (~v + 1'b1) : v;
-            lane_square = abs_v * abs_v;
-        end
-    endfunction
+    always @(*) begin
+        word_sum_s2 = 64'd0;
+        word_sum_s1 = 64'd0;
+        sum_lane = 16'sd0;
+        sum_abs = 16'd0;
+        sum_center_u = 16'd0;
 
-    function signed [15:0] center_modq;
-        input [15:0] v;
-        begin
-            center_modq = (v > HALF_Q_U16) ? ($signed({1'b0, v}) - Q_I16) :
-                                            $signed({1'b0, v});
-        end
-    endfunction
+        for (sum_i = 0; sum_i < 16; sum_i = sum_i + 1) begin
+            sum_lane = mem_rd_data[sum_i*16 +: 16];
+            sum_abs = sum_lane[15] ? (~sum_lane + 1'b1) : sum_lane;
+            word_sum_s2 = word_sum_s2 + (sum_abs * sum_abs);
 
-    function [63:0] packed_signed_square_sum;
-        input [255:0] w;
-        integer i;
-        reg [63:0] acc;
-        reg signed [15:0] lane;
-        begin
-            acc = 64'd0;
-            for (i = 0; i < 16; i = i + 1) begin
-                lane = w[i*16 +: 16];
-                acc = acc + lane_square(lane);
-            end
-            packed_signed_square_sum = acc;
+            sum_center_u = mem_rd_data[sum_i*16 +: 16];
+            sum_lane = (sum_center_u > HALF_Q_U16) ? ($signed({1'b0, sum_center_u}) - Q_I16) :
+                                                     $signed({1'b0, sum_center_u});
+            sum_abs = sum_lane[15] ? (~sum_lane + 1'b1) : sum_lane;
+            word_sum_s1 = word_sum_s1 + (sum_abs * sum_abs);
         end
-    endfunction
-
-    function [63:0] packed_centered_modq_square_sum;
-        input [255:0] w;
-        integer i;
-        reg [63:0] acc;
-        reg signed [15:0] lane;
-        begin
-            acc = 64'd0;
-            for (i = 0; i < 16; i = i + 1) begin
-                lane = center_modq(w[i*16 +: 16]);
-                acc = acc + lane_square(lane);
-            end
-            packed_centered_modq_square_sum = acc;
-        end
-    endfunction
+    end
 
     always @(*) begin
         mem_rd_en = 1'b0;

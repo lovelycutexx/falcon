@@ -69,7 +69,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //   SI:  idle, wait for command
   //   SRR: request 256-bit RNG word
   //   SRW: wait for RNG acknowledge
-  //   SRF: rfp = floor(mu) via hardware function f64_floor_i64
+  //   SRF: rfp = floor(mu) via hardware floor conversion logic
   //   SRI: rfp = int_to_float(rfp)          (FI op)
   //   SRS: r_frac = mu - rfp                (FS op)  fractional part 闂?[0,1)
   //   SRC: branch on r_frac sign (always non-negative in practice)
@@ -174,7 +174,89 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   wire      ccs_cache_hit = ccs_cache_valid && (ccs_cache_si == si);
 
   wire frf = fpu_rsp_valid && fpu_rsp_ready;  // FPU result fire (handshake complete)
-  wire [4:0] bs_now = bs_gaussian0(rb[23:0], rb[47:24], rb[71:48]);
+  wire [71:0] bs_draw = {rb[71:48], rb[47:24], rb[23:0]};
+  wire [4:0] bs_now =
+      (bs_draw < 72'd3104126)
+    + (bs_draw < 72'd28824)
+    + (bs_draw < 72'd198)
+    + (bs_draw < 72'd1)
+    + (bs_draw < 72'h00000e_bf396b)
+    + (bs_draw < 72'h000366_5daa98)
+    + (bs_draw < 72'h00949f_8b0bdf)
+    + (bs_draw < 72'h12cfa4_d02dfb)
+    + (bs_draw < 72'h000001_c3fca1_040c69)
+    + (bs_draw < 72'h00001f_80d54a_7b61a8)
+    + (bs_draw < 72'h0001a1_ffd165_ad637a)
+    + (bs_draw < 72'h001024_dd510b_776ce4)
+    + (bs_draw < 72'h00774a_c74ced_74bcdf)
+    + (bs_draw < 72'h029584_6cb3d3_3f1b2f)
+    + (bs_draw < 72'h0ad175_437987_9943e4)
+    + (bs_draw < 72'h227ded_d099c8_29c1bf)
+    + (bs_draw < 72'h54d42b_181f7f_7dd942)
+    + (bs_draw < 72'ha3f6f4_2ed7ec_391782);
+  wire [63:0] ber_floor64;
+  wire [63:0] mu_floor_i64;
+  wire [63:0] mu_floor_f64;
+  wire [63:0] rfp_f64;
+  wire [63:0] zi_f64;
+  wire [63:0] z_out_f64;
+  wire [63:0] sc_f64;
+  wire [63:0] uniform01_rb;
+  wire        f64_ge_ba_uniform;
+  wire        f64_ge_ba_ru;
+  reg  [63:0] small_uint_ber;
+  reg  [63:0] exp_neg_ber;
+
+  falconsign_samplerz_f64_floor_i64 u_floor_ber (.x(by), .y(ber_floor64));
+  falconsign_samplerz_f64_floor_i64 u_floor_mu  (.x(mu), .y(mu_floor_i64));
+  falconsign_samplerz_i64_to_f64    u_i64_mu    (.a(mu_floor_i64), .y(mu_floor_f64));
+  falconsign_samplerz_i64_to_f64    u_i64_rfp   (.a(rfp), .y(rfp_f64));
+  falconsign_samplerz_i64_to_f64    u_i64_zi    (.a({{48{zi[15]}}, zi}), .y(zi_f64));
+  falconsign_samplerz_i64_to_f64    u_i64_zout  (.a(rint + {{48{zi[15]}}, zi}), .y(z_out_f64));
+  falconsign_samplerz_i64_to_f64    u_i64_sc    (.a({59'd0, sc}), .y(sc_f64));
+  falconsign_samplerz_uniform01     u_uniform   (.r(rb[51:0]), .y(uniform01_rb));
+  falconsign_samplerz_f64_ge        u_ge_uniform(.a(ba), .b(uniform01_rb), .y(f64_ge_ba_uniform));
+  falconsign_samplerz_f64_ge        u_ge_ru     (.a(ba), .b(ru), .y(f64_ge_ba_ru));
+
+  always @(*) begin
+    case (ber_k)
+      4'd0: small_uint_ber = 64'h0000000000000000;
+      4'd1: small_uint_ber = 64'h3FF0000000000000;
+      4'd2: small_uint_ber = 64'h4000000000000000;
+      4'd3: small_uint_ber = 64'h4008000000000000;
+      4'd4: small_uint_ber = 64'h4010000000000000;
+      4'd5: small_uint_ber = 64'h4014000000000000;
+      4'd6: small_uint_ber = 64'h4018000000000000;
+      4'd7: small_uint_ber = 64'h401C000000000000;
+      4'd8: small_uint_ber = 64'h4020000000000000;
+      4'd9: small_uint_ber = 64'h4022000000000000;
+      4'd10: small_uint_ber = 64'h4024000000000000;
+      4'd11: small_uint_ber = 64'h4026000000000000;
+      4'd12: small_uint_ber = 64'h4028000000000000;
+      4'd13: small_uint_ber = 64'h402A000000000000;
+      4'd14: small_uint_ber = 64'h402C000000000000;
+      default: small_uint_ber = 64'h402E000000000000;
+    endcase
+
+    case (ber_k)
+      4'd0: exp_neg_ber = 64'h3FF0000000000000;
+      4'd1: exp_neg_ber = 64'h3FD78B56362CEF38;
+      4'd2: exp_neg_ber = 64'h3FC152AAA3BF81CC;
+      4'd3: exp_neg_ber = 64'h3FA97DB0CCCEB0AF;
+      4'd4: exp_neg_ber = 64'h3F92C155B8213CF4;
+      4'd5: exp_neg_ber = 64'h3F7B993FE00D5376;
+      4'd6: exp_neg_ber = 64'h3F644E51F113D4D6;
+      4'd7: exp_neg_ber = 64'h3F4DE16B9C24A98F;
+      4'd8: exp_neg_ber = 64'h3F35FC21041027AD;
+      4'd9: exp_neg_ber = 64'h3F202CF22526545A;
+      4'd10: exp_neg_ber = 64'h3F07CD79B5647C9A;
+      4'd11: exp_neg_ber = 64'h3EF18354238F6764;
+      4'd12: exp_neg_ber = 64'h3ED9C54C3B43BC8B;
+      4'd13: exp_neg_ber = 64'h3EC2F6053B981D98;
+      4'd14: exp_neg_ber = 64'h3EABE6C6FDB01612;
+      default: exp_neg_ber = 64'h3E94875CA227EC38;
+    endcase
+  end
 
   // Local SamplerZ arithmetic datapath.  The top-level FPU is shared with the
   // ffSampling EXU and serializes every operation; these local combinational
@@ -198,57 +280,6 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
     .invalid(sz_mul_invalid), .overflow(sz_mul_overflow),
     .underflow(sz_mul_underflow), .inexact(sz_mul_inexact)
   );
-
-  function bs_lt72;
-    input [23:0] v0;
-    input [23:0] v1;
-    input [23:0] v2;
-    input [23:0] w0;
-    input [23:0] w1;
-    input [23:0] w2;
-    reg [24:0] d0;
-    reg [24:0] d1;
-    reg [24:0] d2;
-    reg        c0;
-    reg        c1;
-    begin
-      d0 = {1'b0, v0} - {1'b0, w0};
-      c0 = d0[24];
-      d1 = {1'b0, v1} - {1'b0, w1} - {{24{1'b0}}, c0};
-      c1 = d1[24];
-      d2 = {1'b0, v2} - {1'b0, w2} - {{24{1'b0}}, c1};
-      bs_lt72 = d2[24];
-    end
-  endfunction
-
-  function [4:0] bs_gaussian0;
-    input [23:0] v0;
-    input [23:0] v1;
-    input [23:0] v2;
-    reg [4:0] z;
-    begin
-      z = 5'd0;
-      z = z + bs_lt72(v0, v1, v2, 24'd3104126,  24'd0,        24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd28824,    24'd0,        24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd198,      24'd0,        24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd1,        24'd0,        24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd12545723, 24'd14,       24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd6138264,  24'd870,      24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd9111839,  24'd38047,    24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd13644283, 24'd1232676,  24'd0);
-      z = z + bs_lt72(v0, v1, v2, 24'd265321,   24'd12844466, 24'd1);
-      z = z + bs_lt72(v0, v1, v2, 24'd8086568,  24'd8444042,  24'd31);
-      z = z + bs_lt72(v0, v1, v2, 24'd11363290, 24'd16768101, 24'd417);
-      z = z + bs_lt72(v0, v1, v2, 24'd7826148,  24'd14505003, 24'd4132);
-      z = z + bs_lt72(v0, v1, v2, 24'd7650655,  24'd13063405, 24'd30538);
-      z = z + bs_lt72(v0, v1, v2, 24'd4136815,  24'd7122675,  24'd169348);
-      z = z + bs_lt72(v0, v1, v2, 24'd10046180, 24'd4421575,  24'd708981);
-      z = z + bs_lt72(v0, v1, v2, 24'd2736639,  24'd13669192, 24'd2260429);
-      z = z + bs_lt72(v0, v1, v2, 24'd8248194,  24'd1580863,  24'd5559083);
-      z = z + bs_lt72(v0, v1, v2, 24'd3741698,  24'd3068844,  24'd10745844);
-      bs_gaussian0 = z;
-    end
-  endfunction
 
   // FPU interface: always ready, format=0 (FP64), round-to-nearest, no fcvt
   assign fpu_rsp_ready = 1'b1;
@@ -290,182 +321,6 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
   //
   // Uses combinational logic only 闂?no FPU involvement, single-cycle.
   //===================================================================
-  function [63:0] f64_floor_i64;
-    input [63:0] x;
-    reg sign;
-    reg [10:0] exp;
-    reg [51:0] frac;
-    integer e;
-    integer sh;
-    reg [63:0] ip;
-    reg has_frac;
-    begin
-      sign = x[63];
-      exp  = x[62:52];
-      frac = x[51:0];
-      ip = 64'd0;
-      has_frac = 1'b0;
-
-      if (exp == 11'd0) begin
-        // Denormal or zero: |x| < 2^-1022, so integer part is 0
-        has_frac = (x[62:0] != 63'd0);
-        ip = 64'd0;
-      end else if (exp < 11'd1023) begin
-        // |x| < 1: no integer part
-        has_frac = 1'b1;
-        ip = 64'd0;
-      end else begin
-        e = exp - 11'd1023;          // effective binary exponent
-        if (e >= 63) begin
-          // Overflow: value >= 2^63, saturate
-          ip = 64'h7fffffffffffffff;
-          has_frac = 1'b0;
-        end else if (e >= 52) begin
-          // Integer part fits in [52,62] bits: shift left
-          ip = (64'd1 << e) | ({{12{1'b0}}, frac} << (e - 52));
-          has_frac = 1'b0;
-        end else begin
-          // Fraction straddles binary point: shift right
-          sh = 52 - e;
-          ip = (64'd1 << e) | (frac >> sh);
-          has_frac = |(frac & ((64'd1 << sh) - 1'b1));
-        end
-      end
-
-      if (!sign) begin
-        // Positive or zero: floor is the integer part
-        f64_floor_i64 = ip;
-      end else if ((x[62:0] == 63'd0)) begin
-        // -0.0 闂?0 (negation of zero is zero)
-        f64_floor_i64 = 64'd0;
-      end else begin
-        // Negative with fractional part: floor = -(ip + 1)
-        // (2's complement negation of ip+has_frac)
-        f64_floor_i64 = ~(ip + (has_frac ? 64'd1 : 64'd0)) + 1'b1;
-      end
-    end
-  endfunction
-
-  function [63:0] f64_i64;
-    input [63:0] a;
-    reg        neg;
-    reg [63:0] abs_val;
-    reg [10:0] exp;
-    reg [51:0] frac;
-    integer    ii;
-    integer    pos;
-    begin
-      if (a == 64'd0) begin
-        f64_i64 = 64'd0;
-      end else begin
-        neg = a[63];
-        abs_val = neg ? (~a + 1'b1) : a;
-        pos = 63;
-        for (ii = 0; ii < 64; ii = ii + 1) begin
-          if (abs_val[63 - ii]) begin
-            pos = 63 - ii;
-            ii = 63;
-          end
-        end
-        exp = 11'd1023 + pos;
-        frac = (abs_val << (63 - pos)) >> 11;
-        f64_i64 = {neg, exp, frac};
-      end
-    end
-  endfunction
-
-  function f64_ge;
-    input [63:0] a;
-    input [63:0] b;
-    begin
-      if (a == b) begin
-        f64_ge = 1'b1;
-      end else if (a[63] && !b[63]) begin
-        f64_ge = 1'b0;
-      end else if (!a[63] && b[63]) begin
-        f64_ge = 1'b1;
-      end else begin
-        f64_ge = ({~a[63], a[62:0]} >= {~b[63], b[62:0]});
-      end
-    end
-  endfunction
-
-  function [63:0] f64_uniform01;
-    input [51:0] r;
-    integer i;
-    integer msb;
-    reg [10:0] exp;
-    reg [51:0] frac;
-    reg [51:0] rem;
-    begin
-      msb = -1;
-      for (i = 0; i < 52; i = i + 1) begin
-        if (r[i]) begin
-          msb = i;
-        end
-      end
-
-      if (msb < 0) begin
-        f64_uniform01 = 64'd0;
-      end else begin
-        exp = 11'd1023 + msb - 11'd52;
-        rem = r ^ (52'd1 << msb);
-        frac = rem << (52 - msb);
-        f64_uniform01 = {1'b0, exp, frac};
-      end
-    end
-  endfunction
-
-  function [63:0] f64_small_uint;
-    input [3:0] k;
-    begin
-      case (k)
-        4'd0: f64_small_uint = 64'h0000000000000000;
-        4'd1: f64_small_uint = 64'h3FF0000000000000;
-        4'd2: f64_small_uint = 64'h4000000000000000;
-        4'd3: f64_small_uint = 64'h4008000000000000;
-        4'd4: f64_small_uint = 64'h4010000000000000;
-        4'd5: f64_small_uint = 64'h4014000000000000;
-        4'd6: f64_small_uint = 64'h4018000000000000;
-        4'd7: f64_small_uint = 64'h401C000000000000;
-        4'd8: f64_small_uint = 64'h4020000000000000;
-        4'd9: f64_small_uint = 64'h4022000000000000;
-        4'd10: f64_small_uint = 64'h4024000000000000;
-        4'd11: f64_small_uint = 64'h4026000000000000;
-        4'd12: f64_small_uint = 64'h4028000000000000;
-        4'd13: f64_small_uint = 64'h402A000000000000;
-        4'd14: f64_small_uint = 64'h402C000000000000;
-        default: f64_small_uint = 64'h402E000000000000;
-      endcase
-    end
-  endfunction
-
-  function [63:0] exp_neg_uint;
-    input [3:0] k;
-    begin
-      case (k)
-        4'd0: exp_neg_uint = 64'h3FF0000000000000;
-        4'd1: exp_neg_uint = 64'h3FD78B56362CEF38;
-        4'd2: exp_neg_uint = 64'h3FC152AAA3BF81CC;
-        4'd3: exp_neg_uint = 64'h3FA97DB0CCCEB0AF;
-        4'd4: exp_neg_uint = 64'h3F92C155B8213CF4;
-        4'd5: exp_neg_uint = 64'h3F7B993FE00D5376;
-        4'd6: exp_neg_uint = 64'h3F644E51F113D4D6;
-        4'd7: exp_neg_uint = 64'h3F4DE16B9C24A98F;
-        4'd8: exp_neg_uint = 64'h3F35FC21041027AD;
-        4'd9: exp_neg_uint = 64'h3F202CF22526545A;
-        4'd10: exp_neg_uint = 64'h3F07CD79B5647C9A;
-        4'd11: exp_neg_uint = 64'h3EF18354238F6764;
-        4'd12: exp_neg_uint = 64'h3ED9C54C3B43BC8B;
-        4'd13: exp_neg_uint = 64'h3EC2F6053B981D98;
-        4'd14: exp_neg_uint = 64'h3EABE6C6FDB01612;
-        default: exp_neg_uint = 64'h3E94875CA227EC38;
-      endcase
-    end
-  endfunction
-
-  wire [63:0] ber_floor64 = f64_floor_i64(by);
-  wire [63:0] mu_floor_i64 = f64_floor_i64(mu);
   // The FP polynomial path is only a bring-up approximation of Falcon's
   // integer BerExp.  Be conservative for large x; otherwise rare tail
   // candidates are accepted too often and the final norm explodes.
@@ -535,7 +390,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
       end
       SYT: begin
         sz_add_a = by;
-        sz_add_b = f64_small_uint(ber_k);
+        sz_add_b = small_uint_ber;
         sz_add_sub = 1'b1;
       end
       SYP0: begin
@@ -636,9 +491,9 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
         // Setup phase
         SRF: begin
           rint <= mu_floor_i64;
-          rfp  <= f64_i64(mu_floor_i64);         // floor(mu) as FP64, without a separate FPU op
+          rfp  <= mu_floor_f64;                  // floor(mu) as FP64, without a separate FPU op
         end
-        SRI: rfp <= f64_i64(rfp);                 // legacy state, normally skipped
+        SRI: rfp <= rfp_f64;                      // legacy state, normally skipped
         SRS: r_frac <= sz_add_y;                  // r_frac = mu - floor(mu)
         SRC: begin end                             // NOP: branch point
         SR1: r_frac <= sz_add_y;                  // r_frac = r_frac - 1.0
@@ -668,8 +523,8 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 
         // Rejection pipeline
         SSI: begin
-          z_fp  <= f64_i64({{48{zi[15]}}, zi});   // int_to_float(zi)
-          z_out <= f64_i64(rint + {{48{zi[15]}}, zi});
+          z_fp  <= zi_f64;                        // int_to_float(zi)
+          z_out <= z_out_f64;
         end
         SZA: z_out <= sz_add_y;                   // legacy FP add path, normally skipped
         SZR: zmr <= sz_add_y;                     // z_fp - r_frac
@@ -680,7 +535,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 
         // z0 correction: subtract z0闁?(2闁挎粎绂唌ax闁? to account for fixed base-sampler sigma
         // z0 = sc (CDT index). Uses ba as temporary (free before polynomial eval).
-        SZ0: ba <= f64_i64({59'd0, sc});          // ba = int_to_float(sc)
+        SZ0: ba <= sc_f64;                        // ba = int_to_float(sc)
         SZ1: ba <= sz_mul_y;                      // ba = ba * ba = z0^2
         SZ2: sz_prod <= sz_mul_y;                 // first half of local FMA
         SZ2A: by <= sz_add_y;                     // by = by - z0^2/(2*sigma_max^2)
@@ -692,7 +547,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
             // x > 2.0: rejection probability < exp(-2) 闂?0.135 闂?instant reject
             rsp_accept <= 0;
           end else begin
-            bn <= |ber_k; bs <= exp_neg_uint(ber_k);
+            bn <= |ber_k; bs <= exp_neg_ber;
             if (1'b0) begin
               // x 闂?[2.0, 4.0): subtract 2 or 3 depending on by[51]
               bn <= by[51] ? 3 : 2;
@@ -720,15 +575,15 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
 
         // Generate uniform random float ru 闂?[0,1) from RNG buffer
         SYC: begin
-          ru <= f64_uniform01(rb[51:0]);
+          ru <= uniform01_rb;
           if (sim_exact_berexp) begin
 `ifndef SYNTHESIS
-            rsp_accept <= (($exp(-$bitstoreal(x_orig)) * $bitstoreal(ccs)) > $bitstoreal(f64_uniform01(rb[51:0])));
+            rsp_accept <= (($exp(-$bitstoreal(x_orig)) * $bitstoreal(ccs)) > $bitstoreal(uniform01_rb));
 `else
             rsp_accept <= 1'b0;
 `endif
           end else begin
-            rsp_accept <= f64_ge(ba, f64_uniform01(rb[51:0]));
+            rsp_accept <= f64_ge_ba_uniform;
           end
           rb <= {52'd0, rb[255:52]}; ra <= ra - 8'd52;
         end
@@ -743,7 +598,7 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
             rsp_accept <= 1'b0;
 `endif
           end else begin
-            rsp_accept <= f64_ge(ba, ru);
+            rsp_accept <= f64_ge_ba_ru;
           end
         end
 
@@ -866,4 +721,138 @@ module falconsign_samplerz_top #(parameter RNG_DATA_W=256)(
     fpu_req_c     = 64'd0;
   end
 
+endmodule
+
+module falconsign_samplerz_f64_floor_i64(
+  input  wire [63:0] x,
+  output reg  [63:0] y
+);
+  reg sign;
+  reg [10:0] exp;
+  reg [51:0] frac;
+  integer e;
+  integer sh;
+  reg [63:0] ip;
+  reg has_frac;
+
+  always @(*) begin
+    sign = x[63];
+    exp  = x[62:52];
+    frac = x[51:0];
+    ip = 64'd0;
+    has_frac = 1'b0;
+    e = 0;
+    sh = 0;
+
+    if (exp == 11'd0) begin
+      has_frac = (x[62:0] != 63'd0);
+      ip = 64'd0;
+    end else if (exp < 11'd1023) begin
+      has_frac = 1'b1;
+      ip = 64'd0;
+    end else begin
+      e = exp - 11'd1023;
+      if (e >= 63) begin
+        ip = 64'h7fffffffffffffff;
+        has_frac = 1'b0;
+      end else if (e >= 52) begin
+        ip = (64'd1 << e) | ({{12{1'b0}}, frac} << (e - 52));
+        has_frac = 1'b0;
+      end else begin
+        sh = 52 - e;
+        ip = (64'd1 << e) | (frac >> sh);
+        has_frac = |(frac & ((64'd1 << sh) - 1'b1));
+      end
+    end
+
+    if (!sign) begin
+      y = ip;
+    end else if (x[62:0] == 63'd0) begin
+      y = 64'd0;
+    end else begin
+      y = ~(ip + (has_frac ? 64'd1 : 64'd0)) + 1'b1;
+    end
+  end
+endmodule
+
+module falconsign_samplerz_i64_to_f64(
+  input  wire [63:0] a,
+  output reg  [63:0] y
+);
+  reg        neg;
+  reg [63:0] abs_val;
+  reg [10:0] exp;
+  reg [51:0] frac;
+  integer    ii;
+  integer    pos;
+
+  always @(*) begin
+    y = 64'd0;
+    neg = a[63];
+    abs_val = neg ? (~a + 1'b1) : a;
+    exp = 11'd0;
+    frac = 52'd0;
+    pos = 63;
+    if (a != 64'd0) begin
+      for (ii = 0; ii < 64; ii = ii + 1) begin
+        if (abs_val[63 - ii]) begin
+          pos = 63 - ii;
+          ii = 64;
+        end
+      end
+      exp = 11'd1023 + pos;
+      frac = (abs_val << (63 - pos)) >> 11;
+      y = {neg, exp, frac};
+    end
+  end
+endmodule
+
+module falconsign_samplerz_uniform01(
+  input  wire [51:0] r,
+  output reg  [63:0] y
+);
+  integer i;
+  integer msb;
+  reg [10:0] exp;
+  reg [51:0] frac;
+  reg [51:0] rem;
+
+  always @(*) begin
+    msb = -1;
+    exp = 11'd0;
+    frac = 52'd0;
+    rem = 52'd0;
+    for (i = 0; i < 52; i = i + 1) begin
+      if (r[i]) begin
+        msb = i;
+      end
+    end
+
+    if (msb < 0) begin
+      y = 64'd0;
+    end else begin
+      exp = 11'd1023 + msb - 11'd52;
+      rem = r ^ (52'd1 << msb);
+      frac = rem << (52 - msb);
+      y = {1'b0, exp, frac};
+    end
+  end
+endmodule
+
+module falconsign_samplerz_f64_ge(
+  input  wire [63:0] a,
+  input  wire [63:0] b,
+  output reg         y
+);
+  always @(*) begin
+    if (a == b) begin
+      y = 1'b1;
+    end else if (a[63] && !b[63]) begin
+      y = 1'b0;
+    end else if (!a[63] && b[63]) begin
+      y = 1'b1;
+    end else begin
+      y = ({~a[63], a[62:0]} >= {~b[63], b[62:0]});
+    end
+  end
 endmodule

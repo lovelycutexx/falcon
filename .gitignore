@@ -62,3 +62,6 @@ a.out
 *.out
 *.exe
 *.err
+
+# Misnamed local binary dump
+tb/ntt_pre.v

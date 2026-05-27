@@ -32,63 +32,52 @@ module falconsign_norm_check #(
     reg [ADDR_W-1:0] idx_q;
     reg reject_q;
 
-    wire signed [31:0] lane0_i = f64_to_i32(mem_rd_data[ 63:  0]);
-    wire signed [31:0] lane1_i = f64_to_i32(mem_rd_data[127: 64]);
-    wire signed [31:0] lane2_i = f64_to_i32(mem_rd_data[191:128]);
-    wire signed [31:0] lane3_i = f64_to_i32(mem_rd_data[255:192]);
-
-    wire [63:0] lane0_sq = lane_square(lane0_i);
-    wire [63:0] lane1_sq = lane_square(lane1_i);
-    wire [63:0] lane2_sq = lane_square(lane2_i);
-    wire [63:0] lane3_sq = lane_square(lane3_i);
-    wire [63:0] word_sum = lane0_sq + lane1_sq + lane2_sq + lane3_sq;
+    reg signed [31:0] lane_i [0:3];
+    reg [63:0] word_sum;
+    reg sign_q;
+    reg [10:0] exp_q;
+    reg [51:0] frac_q;
+    reg [63:0] mant_q;
+    reg [63:0] mag_q;
+    reg [31:0] abs_lane_q;
+    integer sh_q;
+    integer lane_idx_q;
     wire [63:0] next_norm_sq = norm_sq + word_sum;
 
     assign start_ready = (state == ST_IDLE);
 
-    function signed [31:0] f64_to_i32;
-        input [63:0] f;
-        reg sign;
-        reg [10:0] exp;
-        reg [51:0] frac;
-        reg [63:0] mant;
-        reg [63:0] mag;
-        integer sh;
-        begin
-            sign = f[63];
-            exp  = f[62:52];
-            frac = f[51:0];
-            mant = {12'd0, 1'b1, frac};
+    always @(*) begin
+        word_sum = 64'd0;
+        for (lane_idx_q = 0; lane_idx_q < 4; lane_idx_q = lane_idx_q + 1) begin
+            sign_q = mem_rd_data[lane_idx_q*64 + 63];
+            exp_q  = mem_rd_data[lane_idx_q*64 + 62 -: 11];
+            frac_q = mem_rd_data[lane_idx_q*64 + 51 -: 52];
+            mant_q = {12'd0, 1'b1, frac_q};
+            sh_q = 0;
 
-            if (exp == 11'd0) begin
-                mag = 64'd0;
-            end else if (exp < 11'd1023) begin
-                mag = 64'd0;
-            end else if (exp > 11'd1053) begin
-                mag = 64'h000000007fffffff;
+            if (exp_q == 11'd0) begin
+                mag_q = 64'd0;
+            end else if (exp_q < 11'd1023) begin
+                mag_q = 64'd0;
+            end else if (exp_q > 11'd1053) begin
+                mag_q = 64'h000000007fffffff;
             end else begin
-                sh = exp - 11'd1023;
-                if (sh >= 52)
-                    mag = mant << (sh - 52);
+                sh_q = exp_q - 11'd1023;
+                if (sh_q >= 52)
+                    mag_q = mant_q << (sh_q - 52);
                 else
-                    mag = mant >> (52 - sh);
+                    mag_q = mant_q >> (52 - sh_q);
             end
 
-            if (mag[63:31] != 33'd0)
-                f64_to_i32 = sign ? -32'sh7fffffff : 32'sh7fffffff;
+            if (mag_q[63:31] != 33'd0)
+                lane_i[lane_idx_q] = sign_q ? -32'sh7fffffff : 32'sh7fffffff;
             else
-                f64_to_i32 = sign ? -$signed(mag[31:0]) : $signed(mag[31:0]);
-        end
-    endfunction
+                lane_i[lane_idx_q] = sign_q ? -$signed(mag_q[31:0]) : $signed(mag_q[31:0]);
 
-    function [63:0] lane_square;
-        input signed [31:0] v;
-        reg [31:0] abs_v;
-        begin
-            abs_v = v[31] ? (~v + 1'b1) : v;
-            lane_square = abs_v * abs_v;
+            abs_lane_q = lane_i[lane_idx_q][31] ? (~lane_i[lane_idx_q] + 1'b1) : lane_i[lane_idx_q];
+            word_sum = word_sum + (abs_lane_q * abs_lane_q);
         end
-    endfunction
+    end
 
     always @(*) begin
         mem_rd_en   = 1'b0;

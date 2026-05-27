@@ -31,6 +31,8 @@ module falconsign_keccak_core(
     integer y;
     integer src_idx;
     integer dst_idx;
+    integer rho_offset_q;
+    reg [63:0] round_const_q;
 
     initial begin
         rnd   = 5'd24;
@@ -39,83 +41,35 @@ module falconsign_keccak_core(
             s[i] = 64'd0;
     end
 
-    function [63:0] rotl64;
-        input [63:0] v;
-        input integer n;
-        begin
-            if (n == 0)
-                rotl64 = v;
-            else
-                rotl64 = (v << n) | (v >> (64 - n));
-        end
-    endfunction
-
-    function integer rho_offset;
-        input integer xi;
-        input integer yi;
-        begin
-            case (xi + 5 * yi)
-                0:  rho_offset = 0;
-                1:  rho_offset = 1;
-                2:  rho_offset = 62;
-                3:  rho_offset = 28;
-                4:  rho_offset = 27;
-                5:  rho_offset = 36;
-                6:  rho_offset = 44;
-                7:  rho_offset = 6;
-                8:  rho_offset = 55;
-                9:  rho_offset = 20;
-                10: rho_offset = 3;
-                11: rho_offset = 10;
-                12: rho_offset = 43;
-                13: rho_offset = 25;
-                14: rho_offset = 39;
-                15: rho_offset = 41;
-                16: rho_offset = 45;
-                17: rho_offset = 15;
-                18: rho_offset = 21;
-                19: rho_offset = 8;
-                20: rho_offset = 18;
-                21: rho_offset = 2;
-                22: rho_offset = 61;
-                23: rho_offset = 56;
-                default: rho_offset = 14;
-            endcase
-        end
-    endfunction
-
-    function [63:0] round_const;
-        input [4:0] r;
-        begin
-            case (r)
-                5'd0 : round_const = 64'h0000000000000001;
-                5'd1 : round_const = 64'h0000000000008082;
-                5'd2 : round_const = 64'h800000000000808A;
-                5'd3 : round_const = 64'h8000000080008000;
-                5'd4 : round_const = 64'h000000000000808B;
-                5'd5 : round_const = 64'h0000000080000001;
-                5'd6 : round_const = 64'h8000000080008081;
-                5'd7 : round_const = 64'h8000000000008009;
-                5'd8 : round_const = 64'h000000000000008A;
-                5'd9 : round_const = 64'h0000000000000088;
-                5'd10: round_const = 64'h0000000080008009;
-                5'd11: round_const = 64'h000000008000000A;
-                5'd12: round_const = 64'h000000008000808B;
-                5'd13: round_const = 64'h800000000000008B;
-                5'd14: round_const = 64'h8000000000008089;
-                5'd15: round_const = 64'h8000000000008003;
-                5'd16: round_const = 64'h8000000000008002;
-                5'd17: round_const = 64'h8000000000000080;
-                5'd18: round_const = 64'h000000000000800A;
-                5'd19: round_const = 64'h800000008000000A;
-                5'd20: round_const = 64'h8000000080008081;
-                5'd21: round_const = 64'h8000000000008080;
-                5'd22: round_const = 64'h0000000080000001;
-                5'd23: round_const = 64'h8000000080008008;
-                default: round_const = 64'd0;
-            endcase
-        end
-    endfunction
+    always @(*) begin
+        case (rnd)
+            5'd0 : round_const_q = 64'h0000000000000001;
+            5'd1 : round_const_q = 64'h0000000000008082;
+            5'd2 : round_const_q = 64'h800000000000808A;
+            5'd3 : round_const_q = 64'h8000000080008000;
+            5'd4 : round_const_q = 64'h000000000000808B;
+            5'd5 : round_const_q = 64'h0000000080000001;
+            5'd6 : round_const_q = 64'h8000000080008081;
+            5'd7 : round_const_q = 64'h8000000000008009;
+            5'd8 : round_const_q = 64'h000000000000008A;
+            5'd9 : round_const_q = 64'h0000000000000088;
+            5'd10: round_const_q = 64'h0000000080008009;
+            5'd11: round_const_q = 64'h000000008000000A;
+            5'd12: round_const_q = 64'h000000008000808B;
+            5'd13: round_const_q = 64'h800000000000008B;
+            5'd14: round_const_q = 64'h8000000000008089;
+            5'd15: round_const_q = 64'h8000000000008003;
+            5'd16: round_const_q = 64'h8000000000008002;
+            5'd17: round_const_q = 64'h8000000000000080;
+            5'd18: round_const_q = 64'h000000000000800A;
+            5'd19: round_const_q = 64'h800000008000000A;
+            5'd20: round_const_q = 64'h8000000080008081;
+            5'd21: round_const_q = 64'h8000000000008080;
+            5'd22: round_const_q = 64'h0000000080000001;
+            5'd23: round_const_q = 64'h8000000080008008;
+            default: round_const_q = 64'd0;
+        endcase
+    end
 
     always @(posedge clk) begin
         if (start) begin
@@ -134,13 +88,44 @@ module falconsign_keccak_core(
                 c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
 
             for (x = 0; x < 5; x = x + 1)
-                d[x] = c[(x + 4) % 5] ^ rotl64(c[(x + 1) % 5], 1);
+                d[x] = c[(x + 4) % 5] ^ {c[(x + 1) % 5][62:0], c[(x + 1) % 5][63]};
 
             for (x = 0; x < 5; x = x + 1) begin
                 for (y = 0; y < 5; y = y + 1) begin
                     src_idx = x + 5 * y;
                     dst_idx = y + 5 * ((2 * x + 3 * y) % 5);
-                    b[dst_idx] = rotl64(a[src_idx] ^ d[x], rho_offset(x, y));
+                    case (src_idx)
+                        0:  rho_offset_q = 0;
+                        1:  rho_offset_q = 1;
+                        2:  rho_offset_q = 62;
+                        3:  rho_offset_q = 28;
+                        4:  rho_offset_q = 27;
+                        5:  rho_offset_q = 36;
+                        6:  rho_offset_q = 44;
+                        7:  rho_offset_q = 6;
+                        8:  rho_offset_q = 55;
+                        9:  rho_offset_q = 20;
+                        10: rho_offset_q = 3;
+                        11: rho_offset_q = 10;
+                        12: rho_offset_q = 43;
+                        13: rho_offset_q = 25;
+                        14: rho_offset_q = 39;
+                        15: rho_offset_q = 41;
+                        16: rho_offset_q = 45;
+                        17: rho_offset_q = 15;
+                        18: rho_offset_q = 21;
+                        19: rho_offset_q = 8;
+                        20: rho_offset_q = 18;
+                        21: rho_offset_q = 2;
+                        22: rho_offset_q = 61;
+                        23: rho_offset_q = 56;
+                        default: rho_offset_q = 14;
+                    endcase
+                    if (rho_offset_q == 0)
+                        b[dst_idx] = a[src_idx] ^ d[x];
+                    else
+                        b[dst_idx] = ((a[src_idx] ^ d[x]) << rho_offset_q)
+                                   | ((a[src_idx] ^ d[x]) >> (64 - rho_offset_q));
                 end
             end
 
@@ -151,7 +136,7 @@ module falconsign_keccak_core(
                 end
             end
 
-            s[0] <= (b[0] ^ ((~b[1]) & b[2])) ^ round_const(rnd);
+            s[0] <= (b[0] ^ ((~b[1]) & b[2])) ^ round_const_q;
             rnd <= rnd + 1'b1;
 
             if (rnd == 5'd23)

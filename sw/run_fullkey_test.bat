@@ -84,7 +84,7 @@ for %%f in (
 )
 
 echo === Compiling %TB% ===
-iverilog -g2012 -o "%VVP%" ^
+iverilog -g2005 -o "%VVP%" ^
     "%RT%\falconsign_top.v" ^
     "%RT%\falconsign_memory.v" ^
     "%RT%\falconsign_shake256.v" ^

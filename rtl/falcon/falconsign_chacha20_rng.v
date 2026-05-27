@@ -35,73 +35,62 @@ module falconsign_chacha20_rng #(
     reg        seeded;
 
     integer i;
+    reg [31:0] dr_x0, dr_x1, dr_x2, dr_x3, dr_x4, dr_x5, dr_x6, dr_x7;
+    reg [31:0] dr_x8, dr_x9, dr_x10, dr_x11, dr_x12, dr_x13, dr_x14, dr_x15;
+    reg [511:0] dr_result;
 
     assign seed_ready = (state == S_IDLE);
     assign busy       = (state != S_IDLE) && (state != S_DONE);
 
-    // Quarter round on four state elements (combinational)
-    function [127:0] qr4;
-        input [127:0] in_abcd;
-        reg [31:0] a, b, c, d;
-        begin
-            a = in_abcd[127:96];
-            b = in_abcd[ 95:64];
-            c = in_abcd[ 63:32];
-            d = in_abcd[ 31: 0];
+    always @(*) begin
+        dr_x0 = st[0];   dr_x1 = st[1];   dr_x2 = st[2];   dr_x3 = st[3];
+        dr_x4 = st[4];   dr_x5 = st[5];   dr_x6 = st[6];   dr_x7 = st[7];
+        dr_x8 = st[8];   dr_x9 = st[9];   dr_x10 = st[10]; dr_x11 = st[11];
+        dr_x12 = st[12]; dr_x13 = st[13]; dr_x14 = st[14]; dr_x15 = st[15];
 
-            a = a + b;  d = d ^ a;  d = {d[15:0], d[31:16]};
-            c = c + d;  b = b ^ c;  b = {b[19:0], b[31:20]};
-            a = a + b;  d = d ^ a;  d = {d[23:0], d[31:24]};
-            c = c + d;  b = b ^ c;  b = {b[24:0], b[31:25]};
+        dr_x0 = dr_x0 + dr_x4;   dr_x12 = dr_x12 ^ dr_x0;  dr_x12 = {dr_x12[15:0], dr_x12[31:16]};
+        dr_x8 = dr_x8 + dr_x12;  dr_x4  = dr_x4  ^ dr_x8;  dr_x4  = {dr_x4[19:0],  dr_x4[31:20]};
+        dr_x0 = dr_x0 + dr_x4;   dr_x12 = dr_x12 ^ dr_x0;  dr_x12 = {dr_x12[23:0], dr_x12[31:24]};
+        dr_x8 = dr_x8 + dr_x12;  dr_x4  = dr_x4  ^ dr_x8;  dr_x4  = {dr_x4[24:0],  dr_x4[31:25]};
 
-            qr4 = {a, b, c, d};
-        end
-    endfunction
+        dr_x1 = dr_x1 + dr_x5;   dr_x13 = dr_x13 ^ dr_x1;  dr_x13 = {dr_x13[15:0], dr_x13[31:16]};
+        dr_x9 = dr_x9 + dr_x13;  dr_x5  = dr_x5  ^ dr_x9;  dr_x5  = {dr_x5[19:0],  dr_x5[31:20]};
+        dr_x1 = dr_x1 + dr_x5;   dr_x13 = dr_x13 ^ dr_x1;  dr_x13 = {dr_x13[23:0], dr_x13[31:24]};
+        dr_x9 = dr_x9 + dr_x13;  dr_x5  = dr_x5  ^ dr_x9;  dr_x5  = {dr_x5[24:0],  dr_x5[31:25]};
 
-    // One double round = column round + diagonal round
-    // Modifies all 16 state words
-    function [511:0] double_round;
-        input [511:0] state_in;
-        reg [31:0] x0, x1, x2, x3, x4, x5, x6, x7;
-        reg [31:0] x8, x9, x10, x11, x12, x13, x14, x15;
-        reg [127:0] qr_in, qr_out;
-        begin
-            {x0,x1,x2,x3,x4,x5,x6,x7,
-             x8,x9,x10,x11,x12,x13,x14,x15} = state_in;
+        dr_x2 = dr_x2 + dr_x6;   dr_x14 = dr_x14 ^ dr_x2;  dr_x14 = {dr_x14[15:0], dr_x14[31:16]};
+        dr_x10 = dr_x10 + dr_x14; dr_x6 = dr_x6 ^ dr_x10;  dr_x6  = {dr_x6[19:0],  dr_x6[31:20]};
+        dr_x2 = dr_x2 + dr_x6;   dr_x14 = dr_x14 ^ dr_x2;  dr_x14 = {dr_x14[23:0], dr_x14[31:24]};
+        dr_x10 = dr_x10 + dr_x14; dr_x6 = dr_x6 ^ dr_x10;  dr_x6  = {dr_x6[24:0],  dr_x6[31:25]};
 
-            // Column round: (0,4,8,12), (1,5,9,13), (2,6,10,14), (3,7,11,15)
-            qr_in  = {x0, x4, x8,  x12}; qr_out = qr4(qr_in);
-            {x0, x4, x8,  x12} = qr_out;
-            qr_in  = {x1, x5, x9,  x13}; qr_out = qr4(qr_in);
-            {x1, x5, x9,  x13} = qr_out;
-            qr_in  = {x2, x6, x10, x14}; qr_out = qr4(qr_in);
-            {x2, x6, x10, x14} = qr_out;
-            qr_in  = {x3, x7, x11, x15}; qr_out = qr4(qr_in);
-            {x3, x7, x11, x15} = qr_out;
+        dr_x3 = dr_x3 + dr_x7;   dr_x15 = dr_x15 ^ dr_x3;  dr_x15 = {dr_x15[15:0], dr_x15[31:16]};
+        dr_x11 = dr_x11 + dr_x15; dr_x7 = dr_x7 ^ dr_x11;  dr_x7  = {dr_x7[19:0],  dr_x7[31:20]};
+        dr_x3 = dr_x3 + dr_x7;   dr_x15 = dr_x15 ^ dr_x3;  dr_x15 = {dr_x15[23:0], dr_x15[31:24]};
+        dr_x11 = dr_x11 + dr_x15; dr_x7 = dr_x7 ^ dr_x11;  dr_x7  = {dr_x7[24:0],  dr_x7[31:25]};
 
-            // Diagonal round: (0,5,10,15), (1,6,11,12), (2,7,8,13), (3,4,9,14)
-            qr_in  = {x0, x5, x10, x15}; qr_out = qr4(qr_in);
-            {x0, x5, x10, x15} = qr_out;
-            qr_in  = {x1, x6, x11, x12}; qr_out = qr4(qr_in);
-            {x1, x6, x11, x12} = qr_out;
-            qr_in  = {x2, x7, x8,  x13}; qr_out = qr4(qr_in);
-            {x2, x7, x8,  x13} = qr_out;
-            qr_in  = {x3, x4, x9,  x14}; qr_out = qr4(qr_in);
-            {x3, x4, x9,  x14} = qr_out;
+        dr_x0 = dr_x0 + dr_x5;   dr_x15 = dr_x15 ^ dr_x0;  dr_x15 = {dr_x15[15:0], dr_x15[31:16]};
+        dr_x10 = dr_x10 + dr_x15; dr_x5 = dr_x5 ^ dr_x10;  dr_x5  = {dr_x5[19:0],  dr_x5[31:20]};
+        dr_x0 = dr_x0 + dr_x5;   dr_x15 = dr_x15 ^ dr_x0;  dr_x15 = {dr_x15[23:0], dr_x15[31:24]};
+        dr_x10 = dr_x10 + dr_x15; dr_x5 = dr_x5 ^ dr_x10;  dr_x5  = {dr_x5[24:0],  dr_x5[31:25]};
 
-            double_round = {x0,x1,x2,x3,x4,x5,x6,x7,
-                            x8,x9,x10,x11,x12,x13,x14,x15};
-        end
-    endfunction
+        dr_x1 = dr_x1 + dr_x6;   dr_x12 = dr_x12 ^ dr_x1;  dr_x12 = {dr_x12[15:0], dr_x12[31:16]};
+        dr_x11 = dr_x11 + dr_x12; dr_x6 = dr_x6 ^ dr_x11;  dr_x6  = {dr_x6[19:0],  dr_x6[31:20]};
+        dr_x1 = dr_x1 + dr_x6;   dr_x12 = dr_x12 ^ dr_x1;  dr_x12 = {dr_x12[23:0], dr_x12[31:24]};
+        dr_x11 = dr_x11 + dr_x12; dr_x6 = dr_x6 ^ dr_x11;  dr_x6  = {dr_x6[24:0],  dr_x6[31:25]};
 
-    wire [511:0] st_packed = {
-        st[0],  st[1],  st[2],  st[3],
-        st[4],  st[5],  st[6],  st[7],
-        st[8],  st[9],  st[10], st[11],
-        st[12], st[13], st[14], st[15]
-    };
+        dr_x2 = dr_x2 + dr_x7;   dr_x13 = dr_x13 ^ dr_x2;  dr_x13 = {dr_x13[15:0], dr_x13[31:16]};
+        dr_x8 = dr_x8 + dr_x13;  dr_x7  = dr_x7 ^ dr_x8;   dr_x7  = {dr_x7[19:0],  dr_x7[31:20]};
+        dr_x2 = dr_x2 + dr_x7;   dr_x13 = dr_x13 ^ dr_x2;  dr_x13 = {dr_x13[23:0], dr_x13[31:24]};
+        dr_x8 = dr_x8 + dr_x13;  dr_x7  = dr_x7 ^ dr_x8;   dr_x7  = {dr_x7[24:0],  dr_x7[31:25]};
 
-    wire [511:0] dr_result = double_round(st_packed);
+        dr_x3 = dr_x3 + dr_x4;   dr_x14 = dr_x14 ^ dr_x3;  dr_x14 = {dr_x14[15:0], dr_x14[31:16]};
+        dr_x9 = dr_x9 + dr_x14;  dr_x4  = dr_x4 ^ dr_x9;   dr_x4  = {dr_x4[19:0],  dr_x4[31:20]};
+        dr_x3 = dr_x3 + dr_x4;   dr_x14 = dr_x14 ^ dr_x3;  dr_x14 = {dr_x14[23:0], dr_x14[31:24]};
+        dr_x9 = dr_x9 + dr_x14;  dr_x4  = dr_x4 ^ dr_x9;   dr_x4  = {dr_x4[24:0],  dr_x4[31:25]};
+
+        dr_result = {dr_x0, dr_x1, dr_x2, dr_x3, dr_x4, dr_x5, dr_x6, dr_x7,
+                     dr_x8, dr_x9, dr_x10, dr_x11, dr_x12, dr_x13, dr_x14, dr_x15};
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

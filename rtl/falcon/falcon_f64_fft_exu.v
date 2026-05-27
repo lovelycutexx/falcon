@@ -103,6 +103,7 @@ module falcon_f64_fft_exu #
     integer           fal_hn;
     integer           fal_n;
     integer           fal_rev;
+    integer           fal_rev_idx;
 `endif
 
     wire [ADDR_W-1:0] addr_a_w;
@@ -124,48 +125,26 @@ module falcon_f64_fft_exu #
 
     wire [63:0]       twiddle_im_eff;
     wire [ADDR_W-1:0] bitrev_addr_w;
+    reg  [ADDR_W-1:0] bitrev_addr_r;
+    integer           bitrev_scan_idx;
 
     assign cmd_ready = (state == ST_IDLE);
     assign busy      = (state != ST_IDLE);
     assign twiddle_im_eff = inverse_q ? {~twiddle_im[63], twiddle_im[62:0]} : twiddle_im;
-    assign bitrev_addr_w = bit_reverse_addr(bitrev_idx, logn_q);
+    assign bitrev_addr_w = bitrev_addr_r;
 
-    function [ADDR_W-1:0] bit_reverse_addr;
-        input [ADDR_W-1:0] value;
-        input [4:0]        logn;
-        integer            idx;
-        begin
-            bit_reverse_addr = {ADDR_W{1'b0}};
-            for (idx = 0; idx < ADDR_W; idx = idx + 1) begin
-                if (idx < logn) begin
-                    bit_reverse_addr[logn - idx - 1'b1] = value[idx];
-                end
+    always @(*) begin
+        bitrev_addr_r = {ADDR_W{1'b0}};
+        for (bitrev_scan_idx = 0; bitrev_scan_idx < ADDR_W; bitrev_scan_idx = bitrev_scan_idx + 1) begin
+            if (bitrev_scan_idx < logn_q) begin
+                bitrev_addr_r[logn_q - bitrev_scan_idx - 1'b1] = bitrev_idx[bitrev_scan_idx];
             end
         end
-    endfunction
+    end
 
-    function integer bit_reverse_int;
-        input integer value;
-        input integer bits;
-        integer idx;
-        begin
-            bit_reverse_int = 0;
-            for (idx = 0; idx < bits; idx = idx + 1) begin
-                if (((value >> idx) & 1) != 0)
-                    bit_reverse_int = bit_reverse_int | (1 << (bits - idx - 1));
-            end
-        end
-    endfunction
 
     // Combinational ×0.5: decrement exponent by 1.
     // Safe for Falcon's numeric range — normalised non-zero values only.
-    function [63:0] f64_half;
-        input [63:0] val;
-        begin
-            f64_half = (val[62:52] == 11'd0) ? val
-                     : {val[63], val[62:52] - 1'b1, val[51:0]};
-        end
-    endfunction
 
     falcon_fft_addr_gen_cfg #
     (
@@ -413,7 +392,11 @@ module falcon_f64_fft_exu #
                         fal_dt = fal_t << 1;
                         fal_i1 = 0;
                         for (fal_j1 = 0; fal_j1 < fal_hn; fal_j1 = fal_j1 + fal_dt) begin
-                            fal_rev = bit_reverse_int(fal_hm + fal_i1, logn_q);
+                            fal_rev = 0;
+                            for (fal_rev_idx = 0; fal_rev_idx < logn_q; fal_rev_idx = fal_rev_idx + 1) begin
+                                if ((((fal_hm + fal_i1) >> fal_rev_idx) & 1) != 0)
+                                    fal_rev = fal_rev | (1 << (logn_q - fal_rev_idx - 1));
+                            end
                             fal_s_re = $cos(3.14159265358979323846 * fal_rev / fal_n);
                             fal_s_im = -$sin(3.14159265358979323846 * fal_rev / fal_n);
                             fal_j2 = fal_j1 + fal_t;
@@ -463,10 +446,10 @@ module falcon_f64_fft_exu #
                     if (bfly_out_valid) begin
                         // IFFT multiplies each butterfly output by 0.5 per stage.
                         // Instead of a full FPU multiply, just decrement the exponent.
-                        pair_y0_re_q     <= inverse_q ? f64_half(bfly_y0_re) : bfly_y0_re;
-                        pair_y0_im_q     <= inverse_q ? f64_half(bfly_y0_im) : bfly_y0_im;
-                        pair_y1_re_q     <= inverse_q ? f64_half(bfly_y1_re) : bfly_y1_re;
-                        pair_y1_im_q     <= inverse_q ? f64_half(bfly_y1_im) : bfly_y1_im;
+                        pair_y0_re_q     <= inverse_q ? ((bfly_y0_re[62:52] == 11'd0) ? bfly_y0_re : {bfly_y0_re[63], bfly_y0_re[62:52] - 1'b1, bfly_y0_re[51:0]}) : bfly_y0_re;
+                        pair_y0_im_q     <= inverse_q ? ((bfly_y0_im[62:52] == 11'd0) ? bfly_y0_im : {bfly_y0_im[63], bfly_y0_im[62:52] - 1'b1, bfly_y0_im[51:0]}) : bfly_y0_im;
+                        pair_y1_re_q     <= inverse_q ? ((bfly_y1_re[62:52] == 11'd0) ? bfly_y1_re : {bfly_y1_re[63], bfly_y1_re[62:52] - 1'b1, bfly_y1_re[51:0]}) : bfly_y1_re;
+                        pair_y1_im_q     <= inverse_q ? ((bfly_y1_im[62:52] == 11'd0) ? bfly_y1_im : {bfly_y1_im[63], bfly_y1_im[62:52] - 1'b1, bfly_y1_im[51:0]}) : bfly_y1_im;
                         status_invalid   <= status_invalid | bfly_status_invalid;
                         status_overflow  <= status_overflow | bfly_status_overflow;
                         status_underflow <= status_underflow | bfly_status_underflow;

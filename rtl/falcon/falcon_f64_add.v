@@ -50,44 +50,11 @@ module falcon_f64_add (
     reg [5:0]  norm_shift;
     reg signed [11:0] exp_res;
 
-    function [55:0] shift_right_sticky_56;
-        input [55:0] value;
-        input [10:0] shamt;
-        reg [5:0] idx;
-        reg sticky;
-        reg [55:0] tmp;
-        begin
-            sticky = 1'b0;
-            if (shamt == 0) begin
-                shift_right_sticky_56 = value;
-            end else if (shamt >= 56) begin
-                shift_right_sticky_56 = 56'd0;
-                shift_right_sticky_56[0] = |value;
-            end else begin
-                tmp = value >> shamt;
-                for (idx = 0; idx < 56; idx = idx + 1) begin
-                    if ((idx < shamt) && value[idx]) begin
-                        sticky = 1'b1;
-                    end
-                end
-                tmp[0] = tmp[0] | sticky;
-                shift_right_sticky_56 = tmp;
-            end
-        end
-    endfunction
-
-    function [5:0] leading_shift_56;
-        input [55:0] value;
-        reg [5:0] idx;
-        begin
-            leading_shift_56 = 6'd56;
-            for (idx = 0; idx < 56; idx = idx + 1) begin
-                if ((leading_shift_56 == 6'd56) && value[55-idx]) begin
-                    leading_shift_56 = idx;
-                end
-            end
-        end
-    endfunction
+    reg [10:0] align_shift;
+    reg [5:0]  scan_idx;
+    reg        shift_sticky;
+    reg [55:0] shift_value;
+    reg [55:0] shift_tmp;
 
     always @(*) begin
         sign_a = a[63];
@@ -127,6 +94,11 @@ module falcon_f64_add (
         round_up   = 1'b0;
         norm_shift = 6'd0;
         exp_res    = 0;
+        align_shift = 11'd0;
+        scan_idx    = 6'd0;
+        shift_sticky = 1'b0;
+        shift_value  = 56'd0;
+        shift_tmp    = 56'd0;
 
         y         = 64'd0;
         invalid   = 1'b0;
@@ -167,7 +139,24 @@ module falcon_f64_add (
             end
 
             ext_big   = {mant_big, 3'b000};
-            ext_small = shift_right_sticky_56({mant_small, 3'b000}, exp_big - exp_small);
+            shift_value = {mant_small, 3'b000};
+            align_shift = exp_big - exp_small;
+            shift_sticky = 1'b0;
+            if (align_shift == 11'd0) begin
+                ext_small = shift_value;
+            end else if (align_shift >= 11'd56) begin
+                ext_small = 56'd0;
+                ext_small[0] = |shift_value;
+            end else begin
+                shift_tmp = shift_value >> align_shift;
+                for (scan_idx = 0; scan_idx < 56; scan_idx = scan_idx + 1) begin
+                    if ((scan_idx < align_shift) && shift_value[scan_idx]) begin
+                        shift_sticky = 1'b1;
+                    end
+                end
+                shift_tmp[0] = shift_tmp[0] | shift_sticky;
+                ext_small = shift_tmp;
+            end
 
             if (sign_big == sign_small) begin
                 sum_ext = {1'b0, ext_big} + {1'b0, ext_small};
@@ -190,7 +179,12 @@ module falcon_f64_add (
                     y = 64'd0;
                     exp_res = -1;
                 end else begin
-                    norm_shift = leading_shift_56(diff_ext);
+                    norm_shift = 6'd56;
+                    for (scan_idx = 0; scan_idx < 56; scan_idx = scan_idx + 1) begin
+                        if ((norm_shift == 6'd56) && diff_ext[55-scan_idx]) begin
+                            norm_shift = scan_idx;
+                        end
+                    end
                     if ((norm_shift == 6'd56) || (exp_res <= norm_shift)) begin
                         underflow = 1'b1;
                         y = {sign_res, 11'd0, 52'd0};

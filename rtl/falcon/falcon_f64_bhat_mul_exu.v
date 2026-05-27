@@ -185,17 +185,6 @@ module falcon_f64_bhat_mul_exu #(
         endcase
     end
 
-    task next_or_done;
-    begin
-        if (idx_q == (word_count - 1'b1)) begin
-            state <= ST_DONE;
-        end else begin
-            idx_q <= idx_q + 1'b1;
-            state <= ST_RD_T0;
-        end
-    end
-    endtask
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= ST_IDLE;
@@ -375,7 +364,12 @@ module falcon_f64_bhat_mul_exu #(
                 end
 
                 ST_WR: begin
-                    next_or_done();
+                    if (idx_q == (word_count - 1'b1)) begin
+                        state <= ST_DONE;
+                    end else begin
+                        idx_q <= idx_q + 1'b1;
+                        state <= ST_RD_T0;
+                    end
                 end
 
                 ST_DONE: begin

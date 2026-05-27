@@ -32,34 +32,24 @@ module falconsign_norm_i16_check #(
     reg [ADDR_W-1:0] idx_q;
     reg reject_q;
 
-    wire [63:0] word_sum = packed_signed_square_sum(mem_rd_data);
+    reg [63:0] word_sum;
+    reg signed [15:0] lane_q;
+    reg [15:0] abs_lane_q;
+    integer sum_i;
     wire [63:0] next_norm_sq = norm_sq + word_sum;
 
     assign start_ready = (state == ST_IDLE);
 
-    function [63:0] lane_square;
-        input signed [15:0] v;
-        reg [15:0] abs_v;
-        begin
-            abs_v = v[15] ? (~v + 1'b1) : v;
-            lane_square = abs_v * abs_v;
+    always @(*) begin
+        word_sum = 64'd0;
+        lane_q = 16'sd0;
+        abs_lane_q = 16'd0;
+        for (sum_i = 0; sum_i < 16; sum_i = sum_i + 1) begin
+            lane_q = mem_rd_data[sum_i*16 +: 16];
+            abs_lane_q = lane_q[15] ? (~lane_q + 1'b1) : lane_q;
+            word_sum = word_sum + (abs_lane_q * abs_lane_q);
         end
-    endfunction
-
-    function [63:0] packed_signed_square_sum;
-        input [255:0] w;
-        integer i;
-        reg [63:0] acc;
-        reg signed [15:0] lane;
-        begin
-            acc = 64'd0;
-            for (i = 0; i < 16; i = i + 1) begin
-                lane = w[i*16 +: 16];
-                acc = acc + lane_square(lane);
-            end
-            packed_signed_square_sum = acc;
-        end
-    endfunction
+    end
 
     always @(*) begin
         mem_rd_en   = 1'b0;
